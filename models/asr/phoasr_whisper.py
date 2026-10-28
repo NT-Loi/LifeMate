@@ -1,7 +1,6 @@
 import torch
 import soundfile as sf
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
-from typing import Optional
 from .base import BaseASR
 
 MODEL_ID = "Qualcomm-AI-Research/PhoASR-whisper-small"
@@ -11,7 +10,7 @@ class PhoASRWhisper(BaseASR):
   def __init__(
     self,
     model_id: str = MODEL_ID,
-    device: Optional[str] = None
+    device: str = None
   ):
     self.device = device or (
         "cuda" if torch.cuda.is_available() else "cpu"
@@ -24,9 +23,6 @@ class PhoASRWhisper(BaseASR):
         torch_dtype=torch.float32
     ).to(self.device)
     self.model.eval()
-
-    # just to ignore warning
-    self.model.generation_config.forced_decoder_ids = None
 
   def transcribe(self, audio_path: str) -> str:
       audio, sr = sf.read(audio_path, dtype="float32")

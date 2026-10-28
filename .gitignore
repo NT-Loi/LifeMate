@@ -25,3 +25,4 @@ build/
 Thumbs.db
 
 data
+submission*.jsonl

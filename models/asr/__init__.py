@@ -1,23 +1,19 @@
-from typing import Optional
 from .base import BaseASR
 
+def get_asr(engine: str = None, **kwargs):
+    """Get ASR engine."""
+    if not engine or str(engine).lower() == "none":
+      return None
 
-def get_asr(engine: Optional[str] = "gipformer", **kwargs) -> Optional[BaseASR]:
-  """Factory khởi tạo ASR engine theo cấu hình."""
-  if not engine or engine.lower() == "none":
-    return None
+    if engine == "gipformer":
+      from .gipformer import GipformerASR
+      kwargs.pop("device", None)
+      return GipformerASR(**kwargs)
 
-  if engine.lower() == "gipformer":
-    from .gipformer import GipformerASR
+    if engine == "phoasr_whisper":
+      from .phoasr_whisper import PhoASRWhisper
+      return PhoASRWhisper(**kwargs)
 
-    return GipformerASR(**kwargs)
-
-  if engine.lower() in ("phoasr", "phoasr-whisper", "phoasr_whisper", "whisper"):
-    from .phoasr_whisper import PhoASRWhisper
-
-    return PhoASRWhisper(**kwargs)
-
-  raise ValueError(f"ASR engine không hỗ trợ: {engine}")
-
+    raise ValueError(f"ASR engine {engine} is not supported.")
 
 __all__ = ["BaseASR", "get_asr"]

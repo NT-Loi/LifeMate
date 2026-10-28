@@ -3,5 +3,8 @@ name = "lifemate"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.10"
+dependencies = [
+    "python-dateutil>=3.0.0",
+    "qwen-agent>=0.0.34",
+]
