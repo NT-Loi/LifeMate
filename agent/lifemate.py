@@ -83,6 +83,7 @@ class LifeMateAgent:
       max_tokens: int = 512,
       enable_thinking: bool = False,
       data_dir: Optional[str] = None,
+      load_in_4bit: bool = True,
       **kwargs: Any,
   ):
     self.mode = (mode or "train").lower()
@@ -109,8 +110,8 @@ class LifeMateAgent:
       self.asr = None
 
     # 3. Khởi tạo LLM tương thích Qwen-Agent
-    logger.info(f"🧠 Khởi tạo Qwen-Agent LLM: {llm} (device={device or 'auto'})...")
-    self.llm = get_llm(model_id=llm, device=device)
+    logger.info(f"🧠 Khởi tạo Qwen-Agent LLM: {llm} (device={device or 'auto'}, 4bit={load_in_4bit})...")
+    self.llm = get_llm(model_id=llm, device=device, load_in_4bit=load_in_4bit, **kwargs)
 
     # 4. Nạp ToolEnv factory từ thư mục data
     self.ToolEnv = get_tool_env(self.mode, tools_dir=self.tools_dir)

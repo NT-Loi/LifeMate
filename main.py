@@ -9,10 +9,14 @@ sử dụng bộ công cụ tương ứng trong agent/tools/<mode>.
 import argparse
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import random
 import sys
 import time
+import torch
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
@@ -94,6 +98,18 @@ def parse_args():
       default=None,
       help="Thiết bị chạy LLM ('cpu', 'cuda', hoặc None để auto)",
   )
+  parser.add_argument(
+      "--load-in-4bit",
+      action="store_true",
+      default=True,
+      help="Sử dụng 4-bit NF4 quantization để chống tràn VRAM trên GPU (mặc định: True)",
+  )
+  parser.add_argument(
+      "--no-4bit",
+      dest="load_in_4bit",
+      action="store_false",
+      help="Tắt 4-bit quantization, nạp mô hình ở độ chính xác float16/bfloat16",
+  )
   return parser.parse_args()
 
 
@@ -165,6 +181,7 @@ def main():
       asr=args.asr,
       llm=args.llm,
       device=args.device,
+      load_in_4bit=args.load_in_4bit,
       max_tokens=256,
       enable_thinking=False,
   )
@@ -248,6 +265,8 @@ def main():
           f"(ASR: {res['asr_latency']:.2f}s, LLM: {res['llm_latency']:.2f}s)"
           f"{eval_str}"
       )
+      if torch.cuda.is_available():
+        torch.cuda.empty_cache()
   finally:
     out_fp.close()
 

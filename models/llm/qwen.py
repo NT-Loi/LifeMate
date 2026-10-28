@@ -1,5 +1,4 @@
-from __future__ import annotations
-
+import os
 import json
 import logging
 from typing import Any, Dict, Iterator, List, Optional, Union
@@ -10,6 +9,9 @@ from qwen_agent.llm.function_calling import BaseFnCallModel
 from qwen_agent.llm.schema import ASSISTANT, FUNCTION, USER, ContentItem, Message
 from .base import BaseLLM
 
+# Tránh phân mảnh bộ nhớ CUDA
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 logger = logging.getLogger(__name__)
 MODEL_ID = "Qwen/Qwen3.5-4B"
 
@@ -18,9 +20,9 @@ class QwenLLM(BaseFnCallModel, BaseLLM):
   """Qwen LLM engine tương thích hoàn toàn với framework Qwen-Agent và BaseLLM.
 
   Hỗ trợ:
-    - Mô hình Qwen3.5-4B (4.54B params < 5B quy chuẩn ZAC 2026).
+    - Mô hình Qwen3.5-4B (4.54B params < 5B quy chuẩn ZAC 2026), Qwen2.5-3B, Qwen2.5-1.5B.
     - Function calling tự nhiên qua ChatML và Qwen-Agent prompt templates.
-    - Chạy trên GPU (CUDA) hoặc CPU (bfloat16).
+    - Chạy trên GPU (CUDA 4-bit NF4 / float16) hoặc CPU (bfloat16).
   """
 
   def __init__(
@@ -28,6 +30,7 @@ class QwenLLM(BaseFnCallModel, BaseLLM):
       model_id: str = MODEL_ID,
       device: Optional[str] = None,
       torch_dtype: Optional[str] = None,
+      load_in_4bit: bool = True,
       max_context_length: int = 16384,
       cfg: Optional[Dict] = None,
   ):
@@ -41,8 +44,6 @@ class QwenLLM(BaseFnCallModel, BaseLLM):
     self.max_context_length = min(max_context_length, 16384)
 
     # Tự động chọn kiểu dữ liệu tối ưu:
-    # Trên CUDA: Tesla T4 (sm_75) không hỗ trợ native BF16 tensor core -> dùng float16
-    # Trên GPU mới hơn (A100, L4,...) hoặc CPU -> bfloat16
     if torch_dtype is None:
       if self.device.startswith("cuda"):
         torch_dtype = "bfloat16" if torch.cuda.is_bf16_supported() else "float16"
@@ -55,8 +56,24 @@ class QwenLLM(BaseFnCallModel, BaseLLM):
         else (torch.float16 if torch_dtype == "float16" else torch.float32)
     )
 
+    # Cấu hình 4-bit NF4 Quantization trên CUDA để chống OOM (đặc biệt trên GPU 15GB như Tesla T4)
+    quantization_config = None
+    if self.device.startswith("cuda") and load_in_4bit:
+      try:
+        from transformers import BitsAndBytesConfig
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+        )
+        logger.info(f"⚡ Bật 4-bit NF4 Quantization (BitsAndBytes) cho {model_id} (giảm VRAM từ ~9GB xuống ~2.8GB)!")
+      except Exception as e:
+        logger.warning(f"⚠️ Không thể khởi tạo BitsAndBytesConfig ({e}), nạp mô hình không lượng tử.")
+        quantization_config = None
+
     logger.info(
-        f"🤖 Đang nạp {model_id} (device={self.device}, dtype={torch_dtype})..."
+        f"🤖 Đang nạp {model_id} (device={self.device}, dtype={torch_dtype}, 4bit={quantization_config is not None})..."
     )
     self.config = AutoConfig.from_pretrained(model_id)
     arch = getattr(self.config, "architectures", [""])[0]
@@ -67,10 +84,15 @@ class QwenLLM(BaseFnCallModel, BaseLLM):
       model_cls = AutoModelForCausalLM
 
     if self.device.startswith("cuda"):
+      load_kwargs = {"device_map": "auto"}
+      if quantization_config is not None:
+        load_kwargs["quantization_config"] = quantization_config
+      else:
+        load_kwargs["torch_dtype"] = dtype
+
       self.hf_model = model_cls.from_pretrained(
           model_id,
-          torch_dtype=dtype,
-          device_map="auto",
+          **load_kwargs,
       )
     else:
       self.hf_model = model_cls.from_pretrained(
@@ -166,12 +188,20 @@ class QwenLLM(BaseFnCallModel, BaseLLM):
     if do_sample:
       gen_kwargs["temperature"] = temperature
 
-    with torch.no_grad():
+    if torch.cuda.is_available():
+      torch.cuda.empty_cache()
+
+    with torch.inference_mode():
       output_ids = self.hf_model.generate(**inputs, **gen_kwargs)
 
     input_len = inputs["input_ids"].shape[1]
     new_tokens = output_ids[0, input_len:]
     raw_output = self.tokenizer.decode(new_tokens, skip_special_tokens=False)
+
+    del inputs
+    del output_ids
+    if torch.cuda.is_available():
+      torch.cuda.empty_cache()
 
     for stop_token in ["<|im_end|>", "<|endoftext|>"]:
       raw_output = raw_output.replace(stop_token, "")
