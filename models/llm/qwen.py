@@ -124,9 +124,17 @@ class QwenLLM(BaseFnCallModel, BaseLLM):
 
     self.tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-    num_params = sum(p.numel() for p in self.hf_model.parameters())
+    # Tính tổng số tham số kiến trúc thực tế (kể cả khi các tensor linear được nén 4-bit dạng uint8)
+    total_params = 0
+    for p in self.hf_model.parameters():
+      if hasattr(p, "quant_state") or (hasattr(p, "dtype") and p.dtype == torch.uint8):
+        total_params += p.numel() * 2
+      else:
+        total_params += p.numel()
+
+    quant_str = " [4-bit NF4 Quantized]" if quantization_config is not None else " [FP16 Full Precision]"
     logger.info(
-        f"✅ {model_id} đã sẵn sàng. Tổng tham số: {num_params / 1e9:.2f}B (< 5B)"
+        f"✅ {model_id} đã sẵn sàng. Tổng tham số: {total_params / 1e9:.2f}B (< 5B){quant_str}"
     )
 
   def _get_plain_messages(self, messages: List[Message]) -> List[dict]:

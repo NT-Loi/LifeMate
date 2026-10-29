@@ -110,6 +110,18 @@ def parse_args():
       action="store_false",
       help="Tắt 4-bit quantization, nạp mô hình ở độ chính xác float16/bfloat16",
   )
+  parser.add_argument(
+      "--num-shards",
+      type=int,
+      default=1,
+      help="Tổng số shard để chia dữ liệu khi chạy song song đa GPU (mặc định: 1)",
+  )
+  parser.add_argument(
+      "--shard-id",
+      type=int,
+      default=0,
+      help="ID của shard hiện tại (0 <= shard-id < num-shards, mặc định: 0)",
+  )
   return parser.parse_args()
 
 
@@ -182,6 +194,10 @@ def main():
   else:
     eval_samples = samples
     print(f"🎯 Chạy trên toàn bộ {len(eval_samples)} mẫu.")
+
+  if args.num_shards > 1:
+    eval_samples = [s for i, s in enumerate(eval_samples) if i % args.num_shards == args.shard_id]
+    print(f"🧩 Phân vùng dữ liệu: Shard {args.shard_id}/{args.num_shards} ({len(eval_samples)} mẫu)")
 
   # Khởi tạo LifeMate Agent
   agent = LifeMateAgent(
