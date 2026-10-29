@@ -1,8 +1,7 @@
-from typing import Optional
 from .base import BaseASR
 
 
-def get_asr(engine: Optional[str] = "gipformer", **kwargs) -> Optional[BaseASR]:
+def get_asr(engine: str = "gipformer", **kwargs) -> BaseASR:
   """Factory khởi tạo ASR engine theo cấu hình."""
   if not engine or engine.lower() == "none":
     return None

@@ -1,18 +1,13 @@
 import torch
 import soundfile as sf
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
-from typing import Optional
 from .base import BaseASR
 
 MODEL_ID = "Qualcomm-AI-Research/PhoASR-whisper-small"
 
 class PhoASRWhisper(BaseASR):
 
-  def __init__(
-    self,
-    model_id: str = MODEL_ID,
-    device: Optional[str] = None
-  ):
+  def __init__(self, model_id: str = MODEL_ID, device: str = None):
     self.device = device or (
         "cuda" if torch.cuda.is_available() else "cpu"
     )
