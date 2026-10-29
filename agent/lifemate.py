@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -12,12 +12,26 @@ from qwen_agent.tools import BaseTool
 from config import MODE
 from models import get_asr, get_llm
 from agent.tools import get_tool_env
+from agent.rag import TrainExampleRetriever
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def normalize_asr_text(text: str) -> str:
+  """Khắc phục các lỗi nghe nhầm ngữ âm kinh điển của mô hình ASR."""
+  if not text:
+    return ""
+  t = text
+  # Lỗi vàng SJC -> vàng sec / s j c
+  t = re.sub(r"\bvàng\s+sec\b", "vàng SJC", t, flags=re.IGNORECASE)
+  t = re.sub(r"\bs\s*j\s*c\b", "SJC", t, flags=re.IGNORECASE)
+  # Lỗi thuốc Omeprazole -> thuốc omezon
+  t = re.sub(r"\bomezon\b", "Omeprazole", t, flags=re.IGNORECASE)
+  return t
 
 
 class ZaicTool(BaseTool):
@@ -80,13 +94,15 @@ class LifeMateAgent:
       llm: str = "Qwen/Qwen3.5-4B",
       mode: str = "train",
       device: Optional[str] = None,
-      max_tokens: int = 512,
+      max_tokens: int = 1024,
       enable_thinking: bool = False,
       data_dir: Optional[str] = None,
       load_in_4bit: bool = True,
       **kwargs: Any,
   ):
     self.mode = (mode or "train").lower()
+    self.max_tokens = max_tokens
+    self.enable_thinking = enable_thinking
 
     # 1. Nạp cấu hình từ config.MODE hoặc data_dir tùy chỉnh
     if data_dir:
@@ -110,8 +126,10 @@ class LifeMateAgent:
       self.asr = None
 
     # 3. Khởi tạo LLM tương thích Qwen-Agent
-    logger.info(f"🧠 Khởi tạo Qwen-Agent LLM: {llm} (device={device or 'auto'}, 4bit={load_in_4bit})...")
-    self.llm = get_llm(model_id=llm, device=device, load_in_4bit=load_in_4bit, **kwargs)
+    logger.info(f"🧠 Khởi tạo Qwen-Agent LLM: {llm} (device={device or 'auto'}, 4bit={load_in_4bit}, max_tokens={max_tokens})...")
+    llm_cfg = kwargs.pop("cfg", {}) or {}
+    llm_cfg.setdefault("generate_cfg", {})["max_new_tokens"] = max_tokens
+    self.llm = get_llm(model_id=llm, device=device, load_in_4bit=load_in_4bit, cfg=llm_cfg, **kwargs)
 
     # 4. Nạp ToolEnv factory từ thư mục data
     self.ToolEnv = get_tool_env(self.mode, tools_dir=self.tools_dir)
@@ -119,6 +137,9 @@ class LifeMateAgent:
     # 5. Đọc và lập chỉ mục catalog tool schema
     self.tool_schemas: Dict[str, dict] = {}
     self._load_catalog_schemas()
+
+    # 6. Khởi tạo RAG Few-Shot Retriever từ tập train
+    self.retriever = TrainExampleRetriever(self.data_dir)
 
     logger.info(f"LifeMate Agent (Framework: Qwen-Agent, Mode: {self.mode.upper()}) is ready!")
 
@@ -180,8 +201,8 @@ class LifeMateAgent:
         )
     return tools
 
-  def build_system_message(self, sample: dict) -> str:
-    """Tạo system message mang ngữ cảnh thời gian, vị trí và hồ sơ người dùng."""
+  def build_system_message(self, sample: dict, user_text: str = "") -> str:
+    """Tạo system message mang ngữ cảnh thời gian, vị trí, hồ sơ người dùng, quy tắc ZAC và Few-Shot RAG."""
     context = sample.get("context", {}) or {}
     current_time = context.get("current_time", "")
     timezone = context.get("timezone", "Asia/Ho_Chi_Minh")
@@ -190,15 +211,39 @@ class LifeMateAgent:
 
     city = user_profile.get("city", "") or "Việt Nam"
 
+    # Tập hợp các tool khả dụng trên mẫu dữ liệu hiện tại
+    installed_apps = context.get("installed_apps", {}) or {}
+    available_tools = set()
+    if installed_apps:
+      for app_data in installed_apps.values():
+        if isinstance(app_data, dict):
+          for tname in app_data.get("tools", []):
+            available_tools.add(tname)
+    else:
+      available_tools = set(self.tool_schemas.keys())
+    available_tools.add("sys.ask_missing_info")
+
+    # Lấy các ví dụ mẫu tương đồng từ tập train qua BM25 (chỉ chọn các mẫu có tools khả dụng)
+    few_shot_doc = ""
+    if hasattr(self, "retriever") and self.retriever and user_text:
+      few_shot_doc = self.retriever.format_few_shot_prompt(
+          user_text, top_k=2, available_tools=available_tools
+      )
+
     sys_msg = (
         "Bạn là LifeMate, trợ lý giọng nói thông minh cho gia đình và cuộc sống cá nhân.\n"
         f"• Thời gian hiện tại: {current_time} ({timezone})\n"
         f"• Vị trí: {city} (Lat: {location.get('lat')}, Lng: {location.get('lng')})\n"
         f"• Hồ sơ người dùng: {json.dumps(user_profile, ensure_ascii=False)}\n\n"
-        "Quy tắc gọi công cụ:\n"
-        "1. Dựa trên yêu cầu của người dùng, gọi đúng công cụ phù hợp cùng tham số chính xác.\n"
-        "2. Nếu thiếu thông tin quan trọng mà không thể suy luận được, gọi 'sys.ask_missing_info'.\n"
-        "3. Nếu yêu cầu là câu hỏi bình thường hoặc không cần gọi công cụ, trả lời trực tiếp."
+        "QUY TẮC BẮT BUỘC KHI GỌI CÔNG CỤ (ZALO AI CHALLENGE 2026):\n"
+        "1. Dựa trên yêu cầu của người dùng, BẮT BUỘC gọi công cụ phù hợp với tham số chính xác. TUYỆT ĐỐI không trả lời bằng văn bản trò chuyện thông thường nếu người dùng yêu cầu hành động.\n"
+        "2. Nhà thông minh (smart_home): Luôn gọi 'smart_home.get_status' trước để lấy danh sách thiết bị và trạng thái hiện tại trước khi gọi lệnh điều khiển ('light_set', 'fan_set', 'climate_set'...). Mọi enum trạng thái ('power', 'mode'...) phải viết chữ thường (ví dụ: 'on', 'off', 'cool').\n"
+        "3. Danh bạ & Liên lạc: Luôn gọi 'contacts.search' trước với tên người liên hệ để lấy 'contact_id' trước khi gửi tin nhắn ('sms.send') hoặc gọi điện ('phone.call') hoặc chuyển tiền.\n"
+        "4. Lịch trình (calendar): Luôn gọi 'calendar.list_events' trước để kiểm tra sự kiện trước khi dời, sửa hoặc hủy lịch ('calendar.cancel_event').\n"
+        "5. Giá vàng (gold_price): 'gold_price.get_price' dùng tham số 'type' là 'sjc' (vàng SJC / vàng miếng), 'ring' (vàng nhẫn) hoặc 'world'.\n"
+        "6. Nếu thiếu thông tin bắt buộc mà không thể suy luận được, BẮT BUỘC gọi 'sys.ask_missing_info' với 'tool_name' và 'params' (mảng danh sách tham số thiếu).\n"
+        "7. Nếu yêu cầu là câu hỏi bình thường, chào hỏi hoặc ngoài phạm vi công cụ cài đặt, trả lời ngắn gọn và không gọi công cụ.\n\n"
+        f"{few_shot_doc}"
     )
     return sys_msg
 
@@ -242,13 +287,14 @@ class LifeMateAgent:
 
     # 1. Perceive: Giọng nói -> Văn bản
     user_text, asr_lat = self.perceive(sample)
+    user_text = normalize_asr_text(user_text)
 
     # 2. Khởi tạo môi trường ToolEnv cho sample
     env = self.ToolEnv(self.mode, sid)
 
     # 3. Tạo danh sách ZaicTool và System Message cho mẫu
     sample_tools = self.build_sample_tools(sample, env)
-    system_message = self.build_system_message(sample)
+    system_message = self.build_system_message(sample, user_text=user_text)
 
     # 4. Khởi tạo FnCallAgent từ Qwen-Agent
     t_agent = time.time()

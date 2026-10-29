@@ -26,3 +26,5 @@ Thumbs.db
 
 data
 submission*.jsonl
+sub_part*.jsonl
+*.log

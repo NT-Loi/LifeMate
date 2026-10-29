@@ -117,6 +117,12 @@ def parse_args():
       help="Tắt 4-bit quantization, nạp mô hình ở độ chính xác float16/bfloat16",
   )
   parser.add_argument(
+      "--max-tokens",
+      type=int,
+      default=1024,
+      help="Số lượng token sinh tối đa của LLM (mặc định: 1024)",
+  )
+  parser.add_argument(
       "--num-shards",
       type=int,
       default=1,
@@ -213,7 +219,7 @@ def main():
       llm=args.llm,
       device=args.device,
       load_in_4bit=args.load_in_4bit,
-      max_tokens=256,
+      max_tokens=args.max_tokens,
       enable_thinking=False,
   )
 

@@ -44,6 +44,8 @@ class QwenLLM(BaseFnCallModel, BaseLLM):
   ):
     cfg = cfg or {}
     cfg.setdefault("fncall_prompt_type", "nous")
+    gen_cfg = cfg.setdefault("generate_cfg", {})
+    gen_cfg.setdefault("max_new_tokens", 1024)
     super().__init__(cfg)
 
     self.model_id = model_id
@@ -196,7 +198,7 @@ class QwenLLM(BaseFnCallModel, BaseLLM):
           add_generation_prompt=True,
       )
 
-    max_new_tokens = generate_cfg.get("max_new_tokens", 512)
+    max_new_tokens = generate_cfg.get("max_new_tokens", 1024)
     try:
       model_device = next(self.hf_model.parameters()).device
     except Exception:
@@ -253,7 +255,7 @@ class QwenLLM(BaseFnCallModel, BaseLLM):
   def chat(
       self,
       messages: Any,
-      max_new_tokens: int = 512,
+      max_new_tokens: int = 1024,
       temperature: float = 0.0,
       enable_thinking: bool = False,
       **kwargs: Any,
@@ -282,7 +284,7 @@ class QwenLLM(BaseFnCallModel, BaseLLM):
   def generate(
       self,
       prompt: str,
-      max_new_tokens: int = 512,
+      max_new_tokens: int = 1024,
       temperature: float = 0.0,
       **kwargs: Any,
   ) -> str:
