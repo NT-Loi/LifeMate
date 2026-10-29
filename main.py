@@ -18,6 +18,12 @@ import torch
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+try:
+  sys.stdout.reconfigure(line_buffering=True)
+  sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+  pass
+
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
   sys.path.insert(0, str(ROOT))
