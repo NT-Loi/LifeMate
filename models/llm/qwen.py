@@ -169,7 +169,11 @@ class QwenLLM(BaseFnCallModel, BaseLLM):
       )
 
     max_new_tokens = generate_cfg.get("max_new_tokens", 512)
-    model_device = getattr(self.hf_model, "device", self.device)
+    try:
+      model_device = next(self.hf_model.parameters()).device
+    except Exception:
+      model_device = getattr(self.hf_model, "device", self.device)
+
     inputs = self.tokenizer(
         prompt,
         return_tensors="pt",
