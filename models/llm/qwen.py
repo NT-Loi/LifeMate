@@ -16,13 +16,21 @@ logger = logging.getLogger(__name__)
 MODEL_ID = "Qwen/Qwen3.5-4B"
 
 
+def clear_all_gpu_cache():
+  """Giải phóng cache trên tất cả GPU đang có trong hệ thống."""
+  if torch.cuda.is_available():
+    for i in range(torch.cuda.device_count()):
+      with torch.cuda.device(i):
+        torch.cuda.empty_cache()
+
+
 class QwenLLM(BaseFnCallModel, BaseLLM):
   """Qwen LLM engine tương thích hoàn toàn với framework Qwen-Agent và BaseLLM.
 
   Hỗ trợ:
     - Mô hình Qwen3.5-4B (4.54B params < 5B quy chuẩn ZAC 2026), Qwen2.5-3B, Qwen2.5-1.5B.
     - Function calling tự nhiên qua ChatML và Qwen-Agent prompt templates.
-    - Chạy trên GPU (CUDA 4-bit NF4 / float16) hoặc CPU (bfloat16).
+    - Chạy trên Single-GPU hoặc Multi-GPU (Kaggle 2x T4: balanced_low_0) hoặc CPU.
   """
 
   def __init__(
@@ -84,16 +92,28 @@ class QwenLLM(BaseFnCallModel, BaseLLM):
       model_cls = AutoModelForCausalLM
 
     if self.device.startswith("cuda"):
-      load_kwargs = {"device_map": "auto"}
+      gpu_count = torch.cuda.device_count()
+      # Nếu có từ 2 GPU trở lên (ví dụ Kaggle 2x T4), sử dụng "balanced_low_0" để ép Accelerate
+      # chia đều trọng số mô hình qua cả 2 GPU và chừa headroom trên GPU 0 cho activations
+      dev_map = "balanced_low_0" if gpu_count > 1 else "auto"
+
+      load_kwargs = {"device_map": dev_map}
       if quantization_config is not None:
         load_kwargs["quantization_config"] = quantization_config
       else:
         load_kwargs["torch_dtype"] = dtype
 
+      logger.info(f"🚀 Phân bổ mô hình lên {gpu_count} GPU bằng device_map='{dev_map}'...")
       self.hf_model = model_cls.from_pretrained(
           model_id,
           **load_kwargs,
       )
+
+      # In xác thực danh sách GPU mà mô hình đang chiếm giữ
+      hf_dev_map = getattr(self.hf_model, "hf_device_map", {})
+      if hf_dev_map:
+        active_gpus = sorted(list(set(str(v) for v in hf_dev_map.values())))
+        logger.info(f"✅ Xác nhận: Mô hình đã được phân bổ thành công trên {len(active_gpus)} thiết bị: {active_gpus}")
     else:
       self.hf_model = model_cls.from_pretrained(
           model_id,
@@ -192,8 +212,7 @@ class QwenLLM(BaseFnCallModel, BaseLLM):
     if do_sample:
       gen_kwargs["temperature"] = temperature
 
-    if torch.cuda.is_available():
-      torch.cuda.empty_cache()
+    clear_all_gpu_cache()
 
     with torch.inference_mode():
       output_ids = self.hf_model.generate(**inputs, **gen_kwargs)
@@ -204,8 +223,7 @@ class QwenLLM(BaseFnCallModel, BaseLLM):
 
     del inputs
     del output_ids
-    if torch.cuda.is_available():
-      torch.cuda.empty_cache()
+    clear_all_gpu_cache()
 
     for stop_token in ["<|im_end|>", "<|endoftext|>"]:
       raw_output = raw_output.replace(stop_token, "")

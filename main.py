@@ -154,6 +154,15 @@ def main():
   print(f"   • Tools Runtime:       agent/tools/{mode}")
   print(f"   • ASR Model:           {args.asr}")
   print(f"   • LLM Model:           {args.llm}")
+  if torch.cuda.is_available():
+    num_gpus = torch.cuda.device_count()
+    print(f"   • Thiết bị tăng tốc:   {num_gpus}x CUDA GPU")
+    for i in range(num_gpus):
+      p = torch.cuda.get_device_properties(i)
+      print(f"     + GPU {i}: {p.name} ({p.total_memory / (1024**3):.1f} GB VRAM)")
+  else:
+    print(f"   • Thiết bị:            CPU")
+  print(f"   • 4-bit Quantization:  {'Bật' if args.load_in_4bit else 'Tắt'}")
   print(f"   • Dữ liệu đầu vào:     {jsonl_path}")
   print(f"   • File xuất kết quả:   {args.output}")
   print(f"{'='*75}\n")
@@ -185,6 +194,11 @@ def main():
       max_tokens=256,
       enable_thinking=False,
   )
+
+  hf_map = getattr(getattr(agent.llm, "hf_model", None), "hf_device_map", None)
+  if hf_map:
+    unique_gpus = sorted(list(set(str(v) for v in hf_map.values())))
+    print(f"🎯 Phân bổ mô hình: {len(unique_gpus)} thiết bị ({unique_gpus})")
 
   fuzzy_props_map = {}
   if args.eval and mode == "train":
@@ -266,7 +280,9 @@ def main():
           f"{eval_str}"
       )
       if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        for i in range(torch.cuda.device_count()):
+          with torch.cuda.device(i):
+            torch.cuda.empty_cache()
   finally:
     out_fp.close()
 
