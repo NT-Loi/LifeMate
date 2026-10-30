@@ -9,27 +9,46 @@ import re
 import logging
 logger = logging.getLogger(__name__)
 
+from typing import Any
+from pathlib import Path
+
 class LifeMateAgent:
     """LifeMate Agentic Assistant."""
 
-    def __init__(self, asr: str = "Gipformer", llm: str = "Qwen", mode: str = "train"):
+    def __init__(
+        self,
+        asr: str | None = "Gipformer",
+        llm: str | Any = "Qwen",
+        mode: str = "train",
+        device: str | None = None,
+        data_dir: str | Path | None = None,
+        tools_dir: str | Path | None = None,
+        catalog_path: str | Path | None = None,
+        **llm_kwargs
+    ):
         self.mode = mode
 
         # Load config
-        cfg = MODE.get(self.mode)
-        assert cfg, f"Mode {self.mode} not found in config."
-
-        self.tools_dir = cfg.get("tools_dir")
-        self.catalog_path = cfg.get("catalog_path")
-        self.data_dir = cfg.get("data_dir")
+        cfg = MODE.get(self.mode, {})
+        self.tools_dir = Path(tools_dir) if tools_dir else cfg.get("tools_dir")
+        self.catalog_path = Path(catalog_path) if catalog_path else cfg.get("catalog_path")
+        self.data_dir = Path(data_dir) if data_dir else cfg.get("data_dir")
 
         # Init ASR
-        logger.info(f"Initialize ASR: {asr}")
-        self.asr = get_asr(asr)
+        if asr and str(asr).lower() != "none":
+            logger.info(f"Initialize ASR: {asr}")
+            self.asr = get_asr(asr)
+        else:
+            self.asr = None
 
         # Init LLM
-        logger.info(f"Initialize LLM: {llm}")
-        self.llm = get_llm(engine=llm)
+        if isinstance(llm, str):
+            logger.info(f"Initialize LLM: {llm} (device={device})")
+            if device:
+                llm_kwargs["device"] = device
+            self.llm = get_llm(engine=llm, **llm_kwargs)
+        else:
+            self.llm = llm
 
         # Load ToolEnv 
         self.ToolEnv = get_tool_env(self.mode)

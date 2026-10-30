@@ -4,7 +4,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import logging
 logger = logging.getLogger(__name__)
 
-MODEL_ID = "Qwen/Qwen3.5-2B"
+MODEL_ID = "Qwen/Qwen3.5-4B"
 
 class Qwen(BaseLLM):
     def __init__(self, model_id: str = MODEL_ID, max_context_length: int = 16384, 
@@ -49,9 +49,15 @@ class Qwen(BaseLLM):
 
             if quantization_config is not None:
                 load_kwargs["quantization_config"] = quantization_config
-                load_kwargs["device_map"] = "auto"
+                if self.device and (self.device.startswith("cuda:") or self.device == "cpu"):
+                    load_kwargs["device_map"] = {"": self.device}
+                else:
+                    load_kwargs["device_map"] = "auto"
             else:
-                load_kwargs["device_map"] = self.device
+                if self.device == "auto":
+                    load_kwargs["device_map"] = "auto"
+                else:
+                    load_kwargs["device_map"] = self.device
 
             self.model = AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs)
             self.model.eval()
