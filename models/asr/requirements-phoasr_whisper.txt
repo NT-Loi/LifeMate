@@ -2,6 +2,6 @@
 # Cài đặt bằng uv: uv pip install -r models/asr/requirements-phoasr.txt
 # (Đối với CPU: uv pip install torch --index-url https://download.pytorch.org/whl/cpu && uv pip install -r models/asr/requirements-phoasr.txt)
 torch
-transformers==4.48.0
+transformers==5.21.0
 accelerate
 soundfile>=0.12.0

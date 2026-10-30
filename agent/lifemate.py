@@ -4,13 +4,24 @@ from models import get_asr, get_llm
 from agent.prompt import LifeMatePromptBuilder
 
 import json
+import random
 import re
+import numpy as np
+import torch
 
 import logging
 logger = logging.getLogger(__name__)
 
-from typing import Any
 from pathlib import Path
+
+
+def seed_everything(seed: int = 0):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
 
 class LifeMateAgent:
     """LifeMate Agentic Assistant."""
@@ -18,7 +29,7 @@ class LifeMateAgent:
     def __init__(
         self,
         asr: str | None = "Gipformer",
-        llm: str | Any = "Qwen",
+        model_id: str | None = None,
         mode: str = "train",
         device: str | None = None,
         data_dir: str | Path | None = None,
@@ -26,6 +37,7 @@ class LifeMateAgent:
         catalog_path: str | Path | None = None,
         **llm_kwargs
     ):
+        seed_everything()
         self.mode = mode
 
         # Load config
@@ -42,13 +54,10 @@ class LifeMateAgent:
             self.asr = None
 
         # Init LLM
-        if isinstance(llm, str):
-            logger.info(f"Initialize LLM: {llm} (device={device})")
-            if device:
-                llm_kwargs["device"] = device
-            self.llm = get_llm(engine=llm, **llm_kwargs)
-        else:
-            self.llm = llm
+        if device:
+            llm_kwargs["device"] = device
+        logger.info("Initialize LLM: model_id=%s (device=%s)", model_id or "default", device)
+        self.llm = get_llm(model_id=model_id, **llm_kwargs)
 
         # Load ToolEnv 
         self.ToolEnv = get_tool_env(self.mode)
@@ -80,7 +89,16 @@ class LifeMateAgent:
             try:
                 parsed = json.loads(text[start : end + 1])
                 if isinstance(parsed, list):
-                    return [c for c in parsed if isinstance(c, dict) and "name" in c]
+                    calls = []
+                    for call in parsed:
+                        if not isinstance(call, dict) or not isinstance(call.get("name"), str):
+                            continue
+                        arguments = call.get("arguments", {})
+                        if arguments is None:
+                            arguments = {}
+                        if isinstance(arguments, dict):
+                            calls.append({"name": call["name"], "arguments": arguments})
+                    return calls
             except Exception:
                 pass
         return []
@@ -187,6 +205,9 @@ class LifeMateAgent:
                 messages.append({"role": "assistant", "content": response})
                 break
 
+            if any(call["name"] == "sys.ask_missing_info" for call in tool_calls):
+                break
+
             prev_turn_sigs = turn_sigs
             messages.append({"role": "assistant", "content": response})
 
@@ -199,14 +220,11 @@ class LifeMateAgent:
                 f"HƯỚNG DẪN XỬ LÝ LƯỢT TIẾP THEO:\n"
                 f"1. Phân tích kết quả tra cứu vừa nhận được (kiểm tra điều kiện logic, ID đối tượng, trạng thái hiện tại).\n"
                 f"2. Đánh giá logic điều kiện (nếu yêu cầu có dạng 'Nếu... thì...'):\n"
-                f"   - Nếu điều kiện KHÔNG thỏa mãn: Không thực hiện thêm hành động phụ thuộc nào, trả về [] để kết thúc.\n"
-                f"   - Nếu điều kiện THỎA MÃN (hoặc yêu cầu thực hiện trực tiếp):\n"
-                f"     * Phân rã yêu cầu thành danh sách TẤT CẢ các hành động cần thực hiện.\n"
-                f"     * Đối chiếu với danh sách 'Các công cụ ĐÃ THỰC THI' ở trên để xác định những hành động nào CHƯA được thực hiện.\n"
-                f"     * Xuất ra ĐẦY ĐỦ các công cụ thực thi cho MỌI hành động còn thiếu (lưu ý: hành động gửi tin nhắn/thông báo KHÔNG thay thế cho hành động cập nhật dữ liệu/trạng thái trên app tương ứng; phải thực hiện cả hai nếu được yêu cầu).\n"
-                f"     * Khi cập nhật (update/set/modify), chỉ truyền ID và các trường giá trị mới cần thay đổi.\n"
-                f"3. Điều kiện dừng: Khi TẤT CẢ các hành động theo yêu cầu ĐÃ XUẤT HIỆN trong danh sách 'Các công cụ ĐÃ THỰC THI' (hoặc điều kiện không xảy ra), BẮT BUỘC trả về mảng rỗng: [] để kết thúc.\n"
-                f"4. TUYỆT ĐỐI KHÔNG lặp lại bất kỳ công cụ nào đã có trong danh sách ĐÃ THỰC THI ở trên."
+                f"   - Chỉ thực hiện hành động thuộc nhánh khớp với kết quả; không chạy nhánh đối lập. Điều kiện sai vẫn có thể có nhánh 'còn nếu/không thì'. Nếu nhánh đúng nói 'thôi/giữ nguyên' hoặc không có hành động, trả về [] ngay; tuyệt đối không gọi các write phụ thuộc điều kiện.\n"
+                f"   - Nếu còn thiếu đối tượng/ID cho nhánh được chọn, gọi read tool tương ứng rồi mới write. Với yêu cầu 'dời/đổi/chuyển/hoãn' mục có sẵn, tìm mục hiện tại rồi update, không create. Với x-ref, dùng ID trả về, không dùng tên thay ID.\n"
+                f"3. Phân rã yêu cầu thành các hành động còn thiếu, gồm các hành động vô điều kiện; đối chiếu với 'Các công cụ ĐÃ THỰC THI' để không lặp lại hành động đã xong. Gửi riêng từng hành động được yêu cầu; nhắn tin không thay thế cho cập nhật trạng thái app. Bỏ các tham số tùy chọn không cần và giữ nội dung tin nhắn ngắn, sát yêu cầu.\n"
+                f"4. Khi cập nhật (update/set/modify), chỉ truyền ID và các trường giá trị mới cần thay đổi; khi đổi giờ, giữ nguyên thời lượng nếu không được yêu cầu đổi.\n"
+                f"5. Khi các hành động của nhánh được chọn và các hành động vô điều kiện đã xong, trả về []. Không lặp lại cùng một hành động đã chạy thành công, kể cả khi đổi câu chữ ở tham số fuzzy."
             )
             messages.append({"role": "user", "content": feedback_content})
 
@@ -216,13 +234,14 @@ class LifeMateAgent:
             "full_response": "\n".join(full_responses),
             "tool_calls": env.get_tool_calls(),
             "tool_results": all_tool_results,
-            "final_state": env.get_state(),
             "state_hash": env.get_state_hash(),
             "messages": messages,
         }
 
 if __name__ == "__main__":
+    import argparse
     import sys
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -231,69 +250,63 @@ if __name__ == "__main__":
     )
 
     mode = "train"
+    parser = argparse.ArgumentParser(description="Run LifeMate on selected training samples")
+    parser.add_argument("--model-id", default="Qwen/Qwen3.5-4B")
+    parser.add_argument(
+        "--ids",
+        nargs="+",
+        default=[
+            "train_1036",
+            "train_0977",
+            "train_1061",
+            "train_0004",
+            "train_0018",
+            "train_0026",
+        ],
+    )
+    parser.add_argument("--max-turns", type=int, default=10)
+    parser.add_argument("--max-new-tokens", type=int, default=1024)
+    args = parser.parse_args()
+
     data_path = MODE[mode]["data_path"]
-    sample_id = "train_0001"
+    wanted_ids = set(args.ids)
+    samples = {}
     with open(data_path, "r", encoding="utf-8") as f:
         for line in f:
             if line.strip():
                 item = json.loads(line)
-                if item.get("id") == sample_id:
-                    sample = item
+                if item.get("id") in wanted_ids:
+                    samples[item["id"]] = item
+                if wanted_ids.issubset(samples):
                     break
 
-    # Initialize LifeMate agent 
-    agent = LifeMateAgent(asr=None, llm="Qwen", mode="train")
-    result = agent.predict(sample=sample)
+    missing_ids = wanted_ids - samples.keys()
+    if missing_ids:
+        raise SystemExit(f"Samples not found in {data_path}: {', '.join(sorted(missing_ids))}")
 
-    # Output multi-turn chat corresponding to messages
-    print("=" * 80)
-    print(f"LIFEMATE AGENT TEST CASE: {sample_id}")
-    print("=" * 80)
-    print("\n[TRANSCRIBE COMPARISON]")
-    print(f"Agent Transcribe:\n{result['transcribed_text']}")
-    print(f"\nSample Audio Text:\n{sample.get('audio_text', '')}")
+    agent = LifeMateAgent(
+        asr=None,
+        model_id=args.model_id,
+        mode=mode,
+        max_new_tokens=args.max_new_tokens,
+    )
+    for sample_id in args.ids:
+        sample = samples[sample_id]
+        print(f"\nRunning {sample_id} with {args.model_id}...", flush=True)
+        result = agent.predict(sample=sample, max_turns=args.max_turns)
 
-    print("\n" + "=" * 80)
-    print("MULTI-TURN CHAT CONVERSATION (MESSAGES)")
-    print("=" * 80)
+        gold_calls = sample.get("label", {}).get("tool_calls", [])
+        gold_env = agent.ToolEnv(mode, sample_id)
+        for call in gold_calls:
+            gold_env.call(call.get("name", ""), call.get("arguments", {}))
+        gold_hash = gold_env.get_state_hash()
 
-    turn_count = 0
-    for idx, msg in enumerate(result.get("messages", [])):
-        role = msg.get("role", "").lower()
-        content = msg.get("content", "")
-
-        if role == "system":
-            print("\n" + "-" * 80)
-            print("⚙️ [SYSTEM SPECIFICATIONS]")
-            print("-" * 80)
-            print(content)
-        elif role == "user":
-            if idx == 1:
-                turn_count += 1
-                print("\n" + "-" * 80)
-                print(f"👤 [TURN {turn_count}] USER:")
-                print("-" * 80)
-                print(content)
-            else:
-                print("\n" + "-" * 80)
-                print(f"🔧 [TOOL EXECUTION RESULT]:")
-                print("-" * 80)
-                print(content)
-        elif role == "assistant":
-            print("\n" + "-" * 80)
-            print(f"🤖 [TURN {turn_count}] ASSISTANT:")
-            print("-" * 80)
-            print(content)
-            turn_count += 1
-
-    print("\n" + "=" * 80)
-    print("[FINAL RESULTS]")
-    print("=" * 80)
-    print("Tool Calls:")
-    print(json.dumps(result.get("tool_calls", []), ensure_ascii=False, indent=2))
-    print("\nTool Results:")
-    print(json.dumps(result.get("tool_results", []), ensure_ascii=False, indent=2))
-    # print(f"\nFinal State:")
-    # print(json.dumps(result.get('final_state'), ensure_ascii=False, indent=2))
-    print(f"\nState Hash: {result.get('state_hash')}")
-    print("=" * 80)
+        print(f"\n{'=' * 80}\nSAMPLE {sample_id} | MODEL {args.model_id}")
+        print(f"Request: {sample.get('audio_text', '')}")
+        print("Generated responses:")
+        print(result["full_response"])
+        print("Predicted tool calls:")
+        print(json.dumps(result["tool_calls"], ensure_ascii=False, indent=2))
+        print("Gold tool calls:")
+        print(json.dumps(gold_calls, ensure_ascii=False, indent=2))
+        print(f"State hash match: {result['state_hash'] == gold_hash}", flush=True)

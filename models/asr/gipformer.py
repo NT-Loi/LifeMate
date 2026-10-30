@@ -7,6 +7,10 @@ REPO_IDS = {
     "1.5": "g-group-ai-lab/gipformer1.5-68M-rnnt",
 }
 DEFAULT_VERSION = "1.5"
+MODEL_REVISIONS = {
+    "1": "318322b",
+    "1.5": "dd9227dcd8705c13f33bdbe59728d546ab94480f",
+}
 
 SAMPLE_RATE = 16000
 FEATURE_DIM = 80
@@ -52,21 +56,32 @@ class GipformerASR(BaseASR):
         self.sherpa_onnx = sherpa_onnx
 
         repo_id = REPO_IDS.get(model_version, REPO_IDS[DEFAULT_VERSION])
+        revision = MODEL_REVISIONS.get(model_version, MODEL_REVISIONS[DEFAULT_VERSION])
         encoder_name = ONNX_FILES[quantize]["encoder"]
         decoder_name = ONNX_FILES[quantize]["decoder"]
         joiner_name = ONNX_FILES[quantize]["joiner"]
 
-        encoder = hf_hub_download(repo_id=repo_id, filename=encoder_name)
-        decoder = hf_hub_download(repo_id=repo_id, filename=decoder_name)
-        joiner = hf_hub_download(repo_id=repo_id, filename=joiner_name)
-        tokens = hf_hub_download(repo_id=repo_id, filename=TOKENS_FILE)
+        assets = {
+            name: hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                revision=revision,
+                local_files_only=True,
+            )
+            for name, filename in (
+                ("encoder", encoder_name),
+                ("decoder", decoder_name),
+                ("joiner", joiner_name),
+                ("tokens", TOKENS_FILE),
+            )
+        }
 
         # Create a sherpa-onnx OfflineRecognizer for transducer decoding.
         self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
-            encoder=encoder,
-            decoder=decoder,
-            joiner=joiner,
-            tokens=tokens,
+            encoder=assets["encoder"],
+            decoder=assets["decoder"],
+            joiner=assets["joiner"],
+            tokens=assets["tokens"],
             num_threads=num_threads,
             sample_rate=SAMPLE_RATE,
             feature_dim=FEATURE_DIM,

@@ -3,7 +3,7 @@ import sys
 from config import MODE
 
 def get_tool_env(mode: str = "train"):
-    """Return ToolEnv instance from zaic_tools of mode (train/public_test)."""
+    """Return the ToolEnv class from the requested split."""
     mode = mode.lower()
     if mode not in MODE:
         raise ValueError(f"Invalid mode: {mode!r}. Only supports: {list(MODE.keys())}")
@@ -11,7 +11,7 @@ def get_tool_env(mode: str = "train"):
     tools_dir = MODE[mode]["tools_dir"]
     module_name = f"agent_tools_{mode}"
     if module_name in sys.modules:
-        return sys.modules[module_name]
+        return sys.modules[module_name].ToolEnv
 
     zaic_init = tools_dir / "__init__.py"
     spec = importlib.util.spec_from_file_location(

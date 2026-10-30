@@ -4,6 +4,7 @@ from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 from .base import BaseASR
 
 MODEL_ID = "Qualcomm-AI-Research/PhoASR-whisper-small"
+MODEL_REVISION = "da2d9ae0ac0a6a6faba20add61c2e980ccd85037"
 
 class PhoASRWhisper(BaseASR):
 
@@ -13,9 +14,13 @@ class PhoASRWhisper(BaseASR):
     )
     self.model_id = model_id
 
-    self.processor = AutoProcessor.from_pretrained(model_id)
+    self.processor = AutoProcessor.from_pretrained(
+        model_id, revision=MODEL_REVISION, local_files_only=True
+    )
     self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
         model_id,
+        revision=MODEL_REVISION,
+        local_files_only=True,
         torch_dtype=torch.float32
     ).to(self.device)
     self.model.eval()

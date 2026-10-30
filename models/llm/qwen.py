@@ -1,24 +1,28 @@
 from .base import BaseLLM
 import re
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoModelForMultimodalLM, AutoProcessor
 
 import logging
 logger = logging.getLogger(__name__)
 
 MODEL_ID = "Qwen/Qwen3.5-4B"
+MODEL_REVISIONS = {
+    MODEL_ID: "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "Qwen/Qwen3.5-2B": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+}
 
 class Qwen(BaseLLM):
     def __init__(self, model_id: str = MODEL_ID, max_context_length: int = 16384, 
                 is_quantized: bool = True, dtype: str = None, device: str = None,
-                enable_thinking: bool = False):
+                max_new_tokens: int | None = None):
         self.max_context_length = min(max_context_length, 16384)
+        self.max_new_tokens = max_new_tokens
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.enable_thinking = enable_thinking
 
 
         if dtype is None:
-            if self.device.startswith("cuda"):
+            if self.device.startswith("cuda") or (self.device == "auto" and torch.cuda.is_available()):
                 dtype = "bfloat16" if torch.cuda.is_bf16_supported() else "float16"
             else:
                 dtype = "bfloat16"
@@ -46,11 +50,14 @@ class Qwen(BaseLLM):
         logger.info(f"🤖 Loading {model_id} (device={self.device}, dtype={dtype}, is_quantized={is_quantized})...")
         
         try:
-            self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+            revision = MODEL_REVISIONS.get(model_id)
+            load_kwargs = {"local_files_only": True}
+            if revision:
+                load_kwargs["revision"] = revision
 
-            load_kwargs = {
-                "dtype": dtype
-            }
+            self.processor = AutoProcessor.from_pretrained(model_id, **load_kwargs)
+
+            load_kwargs["dtype"] = dtype
 
             if quantization_config is not None:
                 load_kwargs["quantization_config"] = quantization_config
@@ -64,7 +71,7 @@ class Qwen(BaseLLM):
                 else:
                     load_kwargs["device_map"] = self.device
 
-            self.model = AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs)
+            self.model = AutoModelForMultimodalLM.from_pretrained(model_id, **load_kwargs)
             self.model.eval()
 
             total_params = sum(p.numel() for p in self.model.parameters())
@@ -76,23 +83,14 @@ class Qwen(BaseLLM):
 
     def chat(self, messages: list[dict[str, str]], **kwargs) -> str:
         try:
-            try:
-                inputs = self.tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=True,
-                    add_generation_prompt=True,
-                    return_tensors="pt",
-                    return_dict=True,
-                    enable_thinking=self.enable_thinking,
-                )
-            except Exception:
-                inputs = self.tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=True,
-                    add_generation_prompt=True,
-                    return_tensors="pt",
-                    return_dict=True,
-                )
+            inputs = self.processor.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_tensors="pt",
+                return_dict=True,
+                enable_thinking=False,
+            )
 
             # Move inputs to the model's device
             inputs = {
@@ -106,28 +104,29 @@ class Qwen(BaseLLM):
                     f"Input length ({input_length}) exceeds the context limit "
                     f"({self.max_context_length})."
                 )
+            token_budget = self.max_context_length - input_length
+            if self.max_new_tokens is not None:
+                token_budget = min(token_budget, self.max_new_tokens)
 
             with torch.inference_mode():
                 outputs = self.model.generate(
                     **inputs,
-                    max_new_tokens=self.max_context_length - input_length,
+                    max_new_tokens=token_budget,
                     do_sample=False,
-                    pad_token_id=self.tokenizer.pad_token_id,
+                    pad_token_id=self.processor.tokenizer.pad_token_id,
                     **kwargs
                 )
 
             # Decode only newly generated tokens
             generated_tokens = outputs[0, input_length:]
-            response = self.tokenizer.decode(
+            response = self.processor.tokenizer.decode(
                 generated_tokens,
                 skip_special_tokens=True,
             )
 
-            # Ensure thinking block is stripped if disabled
-            if not self.enable_thinking:
-                response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
-                if "</think>" in response:
-                    response = response.split("</think>")[-1].strip()
+            response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
+            if "</think>" in response:
+                response = response.split("</think>")[-1].strip()
 
             return response.strip()
 

@@ -203,7 +203,7 @@ def _worker_process(
     gpu_id: int | str,
     sub_samples: list[dict],
     mode: str,
-    llm_name: str,
+    model_id: str | None,
     llm_kwargs: dict,
     out_queue: Any,
 ):
@@ -212,7 +212,7 @@ def _worker_process(
     if device.startswith("cuda:") and torch.cuda.is_available():
         torch.cuda.set_device(int(gpu_id))
 
-    agent = LifeMateAgent(asr=None, llm=llm_name, mode=mode, device=device, **llm_kwargs)
+    agent = LifeMateAgent(asr=None, model_id=model_id, mode=mode, device=device, **llm_kwargs)
     fuzzy_map = get_fuzzy_props(agent.catalog_path)
 
     for i, sample in enumerate(sub_samples, 1):
@@ -354,7 +354,7 @@ def run_evaluation(
     mode: str = "train",
     gpus: list[int] | str | None = None,
     output_dir: Path | str | None = None,
-    llm_name: str = "Qwen",
+    model_id: str | None = None,
     **llm_kwargs,
 ) -> list[dict]:
     """Hàm chạy đánh giá đa GPU hoặc đơn GPU, kèm progress bar và lưu file."""
@@ -404,7 +404,7 @@ def run_evaluation(
     # 1. Chế độ Model-Parallelism sharded: 1 model chia đều các GPU với device_map="auto"
     if gpus == "auto":
         print(f"\n🚀 Đánh giá {len(samples)} mẫu với 1 Agent sharded trên toàn bộ GPU (device_map='auto')...")
-        agent = LifeMateAgent(asr=None, llm=llm_name, mode=mode, device="auto", **llm_kwargs)
+        agent = LifeMateAgent(asr=None, model_id=model_id, mode=mode, device="auto", **llm_kwargs)
         fuzzy_map = get_fuzzy_props(agent.catalog_path)
         results = []
 
@@ -441,7 +441,7 @@ def run_evaluation(
         raw_pred_file.close()
         raw_details_file.close()
         raw_conv_file.close()
-        save_evaluation_results(results, output_dir, mode, llm_kwargs.get("model_id"), gpus)
+        save_evaluation_results(results, output_dir, mode, model_id, gpus)
         print_summary(results, output_dir)
         return results
 
@@ -458,7 +458,7 @@ def run_evaluation(
                 continue
             p = ctx.Process(
                 target=_worker_process,
-                args=(gpu_id, sub_samples, mode, llm_name, llm_kwargs, queue),
+                args=(gpu_id, sub_samples, mode, model_id, llm_kwargs, queue),
             )
             p.start()
             processes.append(p)
@@ -492,14 +492,14 @@ def run_evaluation(
         sample_id_order = {s["id"]: idx for idx, s in enumerate(samples)}
         results.sort(key=lambda r: sample_id_order.get(r["id"], 999999))
 
-        save_evaluation_results(results, output_dir, mode, llm_kwargs.get("model_id"), gpus)
+        save_evaluation_results(results, output_dir, mode, model_id, gpus)
         print_summary(results, output_dir)
         return results
 
     # 3. Chế độ đơn GPU hoặc CPU
     dev_str = f"cuda:{gpus[0]}" if isinstance(gpus, list) and str(gpus[0]).isdigit() else ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n🚀 Đánh giá {len(samples)} mẫu trên thiết bị [{dev_str.upper()}]...")
-    agent = LifeMateAgent(asr=None, llm=llm_name, mode=mode, device=dev_str, **llm_kwargs)
+    agent = LifeMateAgent(asr=None, model_id=model_id, mode=mode, device=dev_str, **llm_kwargs)
     fuzzy_map = get_fuzzy_props(agent.catalog_path)
     results = []
 
@@ -537,7 +537,7 @@ def run_evaluation(
     raw_details_file.close()
     raw_conv_file.close()
 
-    save_evaluation_results(results, output_dir, mode, llm_kwargs.get("model_id"), gpus)
+    save_evaluation_results(results, output_dir, mode, model_id, gpus)
     print_summary(results, output_dir)
     return results
 
@@ -567,17 +567,12 @@ def main():
                 if not args.id and args.num_samples > 0 and len(samples) >= args.num_samples:
                     break
 
-    llm_kwargs = {}
-    if args.model_id:
-        llm_kwargs["model_id"] = args.model_id
-
     run_evaluation(
         samples=samples,
         mode=mode,
         gpus=args.gpus,
         output_dir=args.output_dir,
-        llm_name="Qwen",
-        **llm_kwargs,
+        model_id=args.model_id,
     )
 
 

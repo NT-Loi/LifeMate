@@ -1,0 +1,9 @@
+# PyTorch model loading and inference
+torch
+torchvision
+transformers==5.21.0
+accelerate
+
+# Model download/cache support and GPU 4-bit quantization
+huggingface-hub
+bitsandbytes
