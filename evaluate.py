@@ -102,8 +102,76 @@ def evaluate_sample(sub_calls: list, sub_hash: str, gold_calls: list, gold_hash:
     return {"score": score, "state_match": state_match, "p": p, "r": r, "f1": f1, "M": M, "G": ng, "S": ns}
 
 
+def format_conversation(ev: dict) -> str:
+    """Định dạng toàn bộ lịch sử hội thoại của 1 sample thành dạng văn bản dễ đọc."""
+    lines = []
+    sid = ev.get("id", "UNKNOWN")
+    audio_text = ev.get("audio_text", "")
+    score = ev.get("score", 0.0)
+    state_match = ev.get("state_match", False)
+
+    lines.append("=" * 80)
+    lines.append(f"SAMPLE ID: {sid} | SCORE: {score:.4f} | STATE MATCH: {'✅' if state_match else '❌'}")
+    lines.append(f"Yêu cầu người dùng (Audio Text): \"{audio_text}\"")
+    lines.append("=" * 80)
+
+    messages = ev.get("messages", [])
+    if not messages:
+        if ev.get("error"):
+            lines.append(f"\n❌ LỖI TRONG QUÁ TRÌNH THỰC THI: {ev.get('error')}")
+        else:
+            lines.append("\nKhông có lịch sử hội thoại.")
+    else:
+        turn_count = 0
+        for idx, msg in enumerate(messages):
+            role = msg.get("role", "").lower()
+            content = msg.get("content", "")
+
+            if role == "system":
+                lines.append("\n" + "-" * 80)
+                lines.append("⚙️ [SYSTEM PROMPT]")
+                lines.append("-" * 80)
+                lines.append(content)
+            elif role == "user":
+                if idx == 1:
+                    turn_count += 1
+                    lines.append("\n" + "-" * 80)
+                    lines.append(f"👤 [TURN {turn_count}] USER (User Prompt):")
+                    lines.append("-" * 80)
+                    lines.append(content)
+                else:
+                    lines.append("\n" + "-" * 80)
+                    lines.append("🔧 [TOOL EXECUTION FEEDBACK]:")
+                    lines.append("-" * 80)
+                    lines.append(content)
+            elif role == "assistant":
+                lines.append("\n" + "-" * 80)
+                lines.append(f"🤖 [TURN {turn_count}] ASSISTANT (Model Response):")
+                lines.append("-" * 80)
+                lines.append(content)
+                turn_count += 1
+
+    lines.append("\n" + "-" * 80)
+    lines.append("📊 [KẾT QUẢ ĐÁNH GIÁ (EVALUATION SUMMARY)]")
+    lines.append("-" * 80)
+    lines.append(f"• State Match:          {'✅' if state_match else '❌'}")
+    lines.append(f"• Predicted State Hash: {ev.get('sub_hash', '')}")
+    lines.append(f"• Gold State Hash:      {ev.get('gold_hash', '')}")
+    lines.append(f"• Tool Precision:       {ev.get('p', 0.0):.4f}")
+    lines.append(f"• Tool Recall:          {ev.get('r', 0.0):.4f}")
+    lines.append(f"• Tool F1:              {ev.get('f1', 0.0):.4f}")
+    lines.append(f"• Final Score:          {score:.4f}")
+    lines.append("\nPredicted Tool Calls:")
+    lines.append(json.dumps(ev.get("sub_calls", []), ensure_ascii=False, indent=2))
+    lines.append("\nGold Tool Calls:")
+    lines.append(json.dumps(ev.get("gold_calls", []), ensure_ascii=False, indent=2))
+    lines.append("\n" + "=" * 80 + "\n\n")
+
+    return "\n".join(lines)
+
+
 def process_single_sample(agent: LifeMateAgent, sample: dict, fuzzy_map: dict, mode: str) -> dict:
-    """Xử lý và chấm điểm 1 sample, lưu trữ cả thông tin chạy và kết quả điểm."""
+    """Xử lý và chấm điểm 1 sample, lưu trữ cả thông tin chạy, lịch sử hội thoại và kết quả điểm."""
     sid = sample["id"]
     gold_calls = sample.get("label", {}).get("tool_calls", [])
 
@@ -125,6 +193,9 @@ def process_single_sample(agent: LifeMateAgent, sample: dict, fuzzy_map: dict, m
     ev["gold_calls"] = gold_calls
     ev["sub_hash"] = sub_hash
     ev["gold_hash"] = gold_hash
+    ev["messages"] = res.get("messages", [])
+    ev["tool_results"] = res.get("tool_results", [])
+    ev["full_response"] = res.get("full_response", "")
     return ev
 
 
@@ -162,6 +233,8 @@ def _worker_process(
                 "gold_calls": sample.get("label", {}).get("tool_calls", []),
                 "sub_hash": "",
                 "gold_hash": "",
+                "messages": [],
+                "tool_results": [],
                 "error": str(e),
             })
 
@@ -173,7 +246,7 @@ def save_evaluation_results(
     model_id: str | None = None,
     gpus: Any = None,
 ) -> dict:
-    """Lưu kết quả dự đoán (submission format) và chi tiết đánh giá."""
+    """Lưu kết quả dự đoán (submission format), lịch sử hội thoại và chi tiết đánh giá."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -188,13 +261,19 @@ def save_evaluation_results(
             }
             f.write(json.dumps(pred_item, ensure_ascii=False) + "\n")
 
-    # 2. Lưu chi tiết đánh giá từng sample (eval_details.jsonl)
+    # 2. Lưu chi tiết đánh giá từng sample (eval_details.jsonl) kèm lịch sử messages
     details_path = output_dir / "eval_details.jsonl"
     with open(details_path, "w", encoding="utf-8") as f:
         for r in results:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    # 3. Lưu tổng kết chỉ số (eval_summary.json)
+    # 3. Lưu toàn bộ lịch sử hội thoại từng sample dạng text dễ đọc (conversations.txt)
+    conv_path = output_dir / "conversations.txt"
+    with open(conv_path, "w", encoding="utf-8") as f:
+        for r in results:
+            f.write(format_conversation(r))
+
+    # 4. Lưu tổng kết chỉ số (eval_summary.json)
     n = len(results)
     summary = {
         "timestamp": datetime.now().isoformat(),
@@ -210,6 +289,7 @@ def save_evaluation_results(
         "output_files": {
             "predictions": str(pred_path),
             "eval_details": str(details_path),
+            "conversations": str(conv_path),
             "eval_summary": str(output_dir / "eval_summary.json"),
         }
     }
@@ -217,12 +297,13 @@ def save_evaluation_results(
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
-    # 4. Sao chép bản copy vào eval_results/latest để tiện tham chiếu
+    # 5. Sao chép bản copy vào eval_results/latest để tiện tham chiếu
     try:
         latest_dir = output_dir.parent / "latest"
         latest_dir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(pred_path, latest_dir / "predictions.jsonl")
         shutil.copyfile(details_path, latest_dir / "eval_details.jsonl")
+        shutil.copyfile(conv_path, latest_dir / "conversations.txt")
         shutil.copyfile(summary_path, latest_dir / "eval_summary.json")
     except Exception:
         pass
@@ -259,9 +340,13 @@ def print_summary(results: list[dict], output_dir: Path | str | None = None):
         print("💾 Kết quả chạy & đánh giá đã được lưu tại:")
         print(f"   📂 {out_p}")
         print(f"   ├── 📄 predictions.jsonl   (Dự đoán format nộp bài ZAC 2026)")
-        print(f"   ├── 📄 eval_details.jsonl  (Chi tiết từng sample: tool calls, hash, điểm)")
+        print(f"   ├── 📄 eval_details.jsonl  (Chi tiết từng sample: tool calls, hash, điểm, messages)")
+        print(f"   ├── 💬 conversations.txt   (Lịch sử toàn bộ hội thoại từng sample - dễ đọc)")
         print(f"   └── 📊 eval_summary.json   (Chỉ số tổng kết)")
         print("=" * 60)
+        if n == 1:
+            print(f"💡 Xem chi tiết hội thoại: {out_p / 'conversations.txt'}")
+            print("=" * 60)
 
 
 def run_evaluation(
@@ -301,6 +386,7 @@ def run_evaluation(
     # Mở file ghi tăng dần (real-time stream) phòng trường hợp tiến trình bị gián đoạn
     raw_pred_file = open(output_dir / "predictions.jsonl", "w", encoding="utf-8")
     raw_details_file = open(output_dir / "eval_details.jsonl", "w", encoding="utf-8")
+    raw_conv_file = open(output_dir / "conversations.txt", "w", encoding="utf-8")
 
     def _record_sample(ev: dict):
         pred_item = {
@@ -312,6 +398,8 @@ def run_evaluation(
         raw_pred_file.flush()
         raw_details_file.write(json.dumps(ev, ensure_ascii=False) + "\n")
         raw_details_file.flush()
+        raw_conv_file.write(format_conversation(ev))
+        raw_conv_file.flush()
 
     # 1. Chế độ Model-Parallelism sharded: 1 model chia đều các GPU với device_map="auto"
     if gpus == "auto":
@@ -322,17 +410,37 @@ def run_evaluation(
 
         with tqdm(total=len(samples), desc="Evaluating [AUTO SHARD]", unit="sample") as pbar:
             for sample in samples:
-                ev = process_single_sample(agent, sample, fuzzy_map, mode)
+                try:
+                    ev = process_single_sample(agent, sample, fuzzy_map, mode)
+                except Exception as e:
+                    print(f"\n[ERROR] Lỗi xử lý {sample.get('id')}: {e}", flush=True)
+                    ev = {
+                        "id": sample.get("id"),
+                        "audio_text": sample.get("audio_text", ""),
+                        "score": 0.0,
+                        "state_match": False,
+                        "p": 0.0,
+                        "r": 0.0,
+                        "f1": 0.0,
+                        "sub_calls": [],
+                        "gold_calls": sample.get("label", {}).get("tool_calls", []),
+                        "sub_hash": "",
+                        "gold_hash": "",
+                        "messages": [],
+                        "tool_results": [],
+                        "error": str(e),
+                    }
                 results.append(ev)
                 _record_sample(ev)
 
                 run_avg = sum(r["score"] for r in results) / len(results)
-                run_sm = sum(1.0 for r in results if r["state_match"]) / len(results)
-                pbar.set_postfix({"ID": ev["id"], "State": "✅" if ev["state_match"] else "❌", "Score": f"{ev['score']:.2f}", "Avg": f"{run_avg:.2f}", "SM_Acc": f"{run_sm*100:.0f}%"})
+                run_sm = sum(1.0 for r in results if r.get("state_match")) / len(results)
+                pbar.set_postfix({"ID": ev["id"], "State": "✅" if ev.get("state_match") else "❌", "Score": f"{ev.get('score', 0):.2f}", "Avg": f"{run_avg:.2f}", "SM_Acc": f"{run_sm*100:.0f}%"})
                 pbar.update(1)
 
         raw_pred_file.close()
         raw_details_file.close()
+        raw_conv_file.close()
         save_evaluation_results(results, output_dir, mode, llm_kwargs.get("model_id"), gpus)
         print_summary(results, output_dir)
         return results
@@ -378,6 +486,7 @@ def run_evaluation(
 
         raw_pred_file.close()
         raw_details_file.close()
+        raw_conv_file.close()
 
         # Sắp xếp lại kết quả theo thứ tự ID ban đầu
         sample_id_order = {s["id"]: idx for idx, s in enumerate(samples)}
@@ -396,17 +505,37 @@ def run_evaluation(
 
     with tqdm(total=len(samples), desc=f"Evaluating [{dev_str.upper()}]", unit="sample") as pbar:
         for sample in samples:
-            ev = process_single_sample(agent, sample, fuzzy_map, mode)
+            try:
+                ev = process_single_sample(agent, sample, fuzzy_map, mode)
+            except Exception as e:
+                print(f"\n[ERROR] Lỗi xử lý {sample.get('id')}: {e}", flush=True)
+                ev = {
+                    "id": sample.get("id"),
+                    "audio_text": sample.get("audio_text", ""),
+                    "score": 0.0,
+                    "state_match": False,
+                    "p": 0.0,
+                    "r": 0.0,
+                    "f1": 0.0,
+                    "sub_calls": [],
+                    "gold_calls": sample.get("label", {}).get("tool_calls", []),
+                    "sub_hash": "",
+                    "gold_hash": "",
+                    "messages": [],
+                    "tool_results": [],
+                    "error": str(e),
+                }
             results.append(ev)
             _record_sample(ev)
 
             run_avg = sum(r["score"] for r in results) / len(results)
-            run_sm = sum(1.0 for r in results if r["state_match"]) / len(results)
-            pbar.set_postfix({"ID": ev["id"], "State": "✅" if ev["state_match"] else "❌", "Score": f"{ev['score']:.2f}", "Avg": f"{run_avg:.2f}", "SM": f"{run_sm*100:.0f}%"})
+            run_sm = sum(1.0 for r in results if r.get("state_match")) / len(results)
+            pbar.set_postfix({"ID": ev["id"], "State": "✅" if ev.get("state_match") else "❌", "Score": f"{ev.get('score', 0):.2f}", "Avg": f"{run_avg:.2f}", "SM": f"{run_sm*100:.0f}%"})
             pbar.update(1)
 
     raw_pred_file.close()
     raw_details_file.close()
+    raw_conv_file.close()
 
     save_evaluation_results(results, output_dir, mode, llm_kwargs.get("model_id"), gpus)
     print_summary(results, output_dir)
