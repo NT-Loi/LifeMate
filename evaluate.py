@@ -16,6 +16,15 @@ from tqdm import tqdm
 from agent.lifemate import LifeMateAgent
 from config import MODE
 
+import logging
+import sys
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    stream=sys.stdout,
+    force=True,
+)
+logger = logging.getLogger(__name__)
 
 def get_fuzzy_props(catalog_path: str | Path) -> dict[str, set[str]]:
     """Trích xuất danh sách các thuộc tính fuzzy (x-match: fuzzy) từ catalog."""

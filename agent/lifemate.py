@@ -62,6 +62,11 @@ class LifeMateAgent:
     def parse_json_calls(text: str):
         """Extract JSON tool calls list from model output text."""
         text = text.strip()
+        if "<think>" in text or "</think>" in text:
+            text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+            if "</think>" in text:
+                text = text.split("</think>")[-1].strip()
+
         if "```" in text:
             match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
             if match:

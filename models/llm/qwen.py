@@ -1,16 +1,21 @@
 from .base import BaseLLM
+import re
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
+
 import logging
 logger = logging.getLogger(__name__)
 
-MODEL_ID = "Qwen/Qwen3.5-2B"
+MODEL_ID = "Qwen/Qwen3.5-4B"
 
 class Qwen(BaseLLM):
     def __init__(self, model_id: str = MODEL_ID, max_context_length: int = 16384, 
-                is_quantized: bool = True, dtype: str = None, device: str = None):
+                is_quantized: bool = True, dtype: str = None, device: str = None,
+                enable_thinking: bool = False):
         self.max_context_length = min(max_context_length, 16384)
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.enable_thinking = enable_thinking
+
 
         if dtype is None:
             if self.device.startswith("cuda"):
@@ -71,13 +76,23 @@ class Qwen(BaseLLM):
 
     def chat(self, messages: list[dict[str, str]], **kwargs) -> str:
         try:
-            inputs = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-                return_tensors="pt",
-                return_dict=True,
-            )
+            try:
+                inputs = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    return_tensors="pt",
+                    return_dict=True,
+                    enable_thinking=self.enable_thinking,
+                )
+            except Exception:
+                inputs = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    return_tensors="pt",
+                    return_dict=True,
+                )
 
             # Move inputs to the model's device
             inputs = {
@@ -107,6 +122,12 @@ class Qwen(BaseLLM):
                 generated_tokens,
                 skip_special_tokens=True,
             )
+
+            # Ensure thinking block is stripped if disabled
+            if not self.enable_thinking:
+                response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
+                if "</think>" in response:
+                    response = response.split("</think>")[-1].strip()
 
             return response.strip()
 
