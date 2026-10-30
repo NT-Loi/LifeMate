@@ -196,11 +196,17 @@ class LifeMateAgent:
                 f"Các công cụ ĐÃ THỰC THI từ đầu đến giờ:\n"
                 + "\n".join(executed_summary)
                 + f"\n\nYêu cầu ban đầu của người dùng: \"{audio_text}\"\n\n"
-                f"HƯỚNG DẪN BƯỚC TIẾP THEO:\n"
-                f"1. Phân tích kết quả các công cụ vừa nhận được ở trên (các ID thu được như event_id, contact_id, điều kiện thời tiết rain=true/false, v.v.).\n"
-                f"2. Nếu điều kiện thỏa mãn và còn hành động chưa thực hiện: Hãy gọi đầy đủ các công cụ hành động đó (sử dụng các ID và thông tin đã thu thập được ở trên).\n"
-                f"3. Đối chiếu danh sách các công cụ ĐÃ THỰC THI ở trên với yêu cầu ban đầu của người dùng: \"{audio_text}\". Nếu TẤT CẢ các hành động theo yêu cầu ĐÃ ĐƯỢC THỰC HIỆN XONG (hoặc điều kiện không xảy ra): BẮT BUỘC trả về mảng rỗng: [] để kết thúc.\n"
-                f"4. TUYỆT ĐỐI KHÔNG thực hiện lại các hành động hoặc gọi lại các công cụ đã có trong danh sách ĐÃ THỰC THI ở trên."
+                f"HƯỚNG DẪN XỬ LÝ LƯỢT TIẾP THEO:\n"
+                f"1. Phân tích kết quả tra cứu vừa nhận được (kiểm tra điều kiện logic, ID đối tượng, trạng thái hiện tại).\n"
+                f"2. Đánh giá logic điều kiện (nếu yêu cầu có dạng 'Nếu... thì...'):\n"
+                f"   - Nếu điều kiện KHÔNG thỏa mãn: Không thực hiện thêm hành động phụ thuộc nào, trả về [] để kết thúc.\n"
+                f"   - Nếu điều kiện THỎA MÃN (hoặc yêu cầu thực hiện trực tiếp):\n"
+                f"     * Phân rã yêu cầu thành danh sách TẤT CẢ các hành động cần thực hiện.\n"
+                f"     * Đối chiếu với danh sách 'Các công cụ ĐÃ THỰC THI' ở trên để xác định những hành động nào CHƯA được thực hiện.\n"
+                f"     * Xuất ra ĐẦY ĐỦ các công cụ thực thi cho MỌI hành động còn thiếu (lưu ý: hành động gửi tin nhắn/thông báo KHÔNG thay thế cho hành động cập nhật dữ liệu/trạng thái trên app tương ứng; phải thực hiện cả hai nếu được yêu cầu).\n"
+                f"     * Khi cập nhật (update/set/modify), chỉ truyền ID và các trường giá trị mới cần thay đổi.\n"
+                f"3. Điều kiện dừng: Khi TẤT CẢ các hành động theo yêu cầu ĐÃ XUẤT HIỆN trong danh sách 'Các công cụ ĐÃ THỰC THI' (hoặc điều kiện không xảy ra), BẮT BUỘC trả về mảng rỗng: [] để kết thúc.\n"
+                f"4. TUYỆT ĐỐI KHÔNG lặp lại bất kỳ công cụ nào đã có trong danh sách ĐÃ THỰC THI ở trên."
             )
             messages.append({"role": "user", "content": feedback_content})
 
