@@ -4,7 +4,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import logging
 logger = logging.getLogger(__name__)
 
-MODEL_ID = "Qwen/Qwen3.5-4B"
+MODEL_ID = "Qwen/Qwen3.5-2B"
 
 class Qwen(BaseLLM):
     def __init__(self, model_id: str = MODEL_ID, max_context_length: int = 16384, 
