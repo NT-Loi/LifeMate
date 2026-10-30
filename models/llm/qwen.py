@@ -4,7 +4,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import logging
 logger = logging.getLogger(__name__)
 
-MODEL_ID = "Qwen/Qwen3.5-4B"
+MODEL_ID = "Qwen/Qwen3.5-2B"
 
 class Qwen(BaseLLM):
     def __init__(self, model_id: str = MODEL_ID, max_context_length: int = 16384, 
@@ -57,13 +57,13 @@ class Qwen(BaseLLM):
             self.model.eval()
 
             total_params = sum(p.numel() for p in self.model.parameters())
-            logger.info(f"✅ Model loaded successfully. Total parameters: {total_params / 1e9:.2f}B")
+            logger.info(f"✅ {model_id} loaded successfully. Total parameters: {total_params / 1e9:.2f}B")
 
         except Exception:
             logger.exception(f"❌ Failed to load model {model_id}.")
             raise
 
-    def chat(self, messages: list[dict[str, str]]) -> str:
+    def chat(self, messages: list[dict[str, str]], **kwargs) -> str:
         try:
             inputs = self.tokenizer.apply_chat_template(
                 messages,
@@ -91,7 +91,8 @@ class Qwen(BaseLLM):
                     **inputs,
                     max_new_tokens=self.max_context_length - input_length,
                     do_sample=False,
-                    pad_token_id=self.tokenizer.pad_token_id
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    **kwargs
                 )
 
             # Decode only newly generated tokens

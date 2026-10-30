@@ -1,4 +1,6 @@
 from .base import BaseASR
+import logging
+logger = logging.getLogger(__name__)
 
 REPO_IDS = {
     "1": "g-group-ai-lab/gipformer-68M-rnnt",
@@ -70,6 +72,7 @@ class GipformerASR(BaseASR):
             feature_dim=FEATURE_DIM,
             decoding_method=decoding_method,
         )
+        logger.info(f"✅ {repo_id} loaded successfully.")
 
     def read_audio(self, filename: str) -> tuple:
         """Read an audio file and return float32 samples and sample rate.
