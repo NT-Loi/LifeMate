@@ -184,9 +184,8 @@ class LifeMateAgent:
             "id": id,
             "transcribed_text": audio_text,
             "full_response": "\n".join(full_responses),
-            "tool_calls": all_tool_calls,
+            "tool_calls": env.get_tool_calls(),
             "tool_results": all_tool_results,
-            "executed_calls": env.get_tool_calls(),
             "final_state": env.get_state(),
             "state_hash": env.get_state_hash(),
             "messages": messages,
@@ -258,11 +257,13 @@ if __name__ == "__main__":
             turn_count += 1
 
     print("\n" + "=" * 80)
-    print("[FINAL TOOL CALLS & LABEL COMPARISON]")
+    print("[FINAL RESULTS]")
     print("=" * 80)
-    print("Agent Executed Calls (env.get_tool_calls):")
-    print(json.dumps(result.get("executed_calls", []), ensure_ascii=False, indent=2))
-    print("\nSample Label Tool Calls:")
-    print(json.dumps(sample.get("label", {}).get("tool_calls", []), ensure_ascii=False, indent=2))
-    print(f"\nAgent State Hash: {result.get('state_hash')}")
+    print("Tool Calls:")
+    print(json.dumps(result.get("tool_calls", []), ensure_ascii=False, indent=2))
+    print("\nTool Results:")
+    print(json.dumps(result.get("tool_results", []), ensure_ascii=False, indent=2))
+    # print(f"\nFinal State:")
+    # print(json.dumps(result.get('final_state'), ensure_ascii=False, indent=2))
+    print(f"\nState Hash: {result.get('state_hash')}")
     print("=" * 80)
