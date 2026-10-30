@@ -28,4 +28,5 @@ data
 benchmark
 scripts
 workspace
+eval_results/
 .gitignore
