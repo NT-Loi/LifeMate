@@ -8,9 +8,6 @@ build/
 # Virtual environment
 .venv/
 
-# uv
-.python-version
-
 # Environment variables and secrets
 .env
 .env.*
