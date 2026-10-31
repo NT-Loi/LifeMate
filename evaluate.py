@@ -59,7 +59,7 @@ class _Tee:
 
 @contextmanager
 def _capture_output(log_path: Path | str):
-    """Keep terminal output and Python log records in a per-process log file."""
+    """Capture output while keeping Python log records away from tqdm's terminal stream."""
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8", buffering=1) as log_file:
@@ -69,6 +69,9 @@ def _capture_output(log_path: Path | str):
             "%(asctime)s - %(processName)s - %(name)s - %(levelname)s - %(message)s"
         ))
         root_logger = logging.getLogger()
+        old_handlers = root_logger.handlers[:]
+        for handler in old_handlers:
+            root_logger.removeHandler(handler)
         root_logger.addHandler(file_handler)
         sys.stdout = _Tee(old_stdout, log_file)
         sys.stderr = _Tee(old_stderr, log_file)
@@ -77,6 +80,8 @@ def _capture_output(log_path: Path | str):
         finally:
             sys.stdout, sys.stderr = old_stdout, old_stderr
             root_logger.removeHandler(file_handler)
+            for handler in old_handlers:
+                root_logger.addHandler(handler)
             file_handler.close()
 
 
