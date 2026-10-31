@@ -19,6 +19,7 @@ class Qwen(BaseLLM):
         self.max_context_length = min(max_context_length, 16384)
         self.max_new_tokens = max_new_tokens
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.reset_cache()
 
 
         if dtype is None:
@@ -81,32 +82,72 @@ class Qwen(BaseLLM):
             logger.exception(f"❌ Failed to load model {model_id}.")
             raise
 
-    def chat(self, messages: list[dict[str, str]], **kwargs) -> str:
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict] | None = None,
+        **kwargs,
+    ) -> str:
         try:
-            inputs = self.processor.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-                return_tensors="pt",
-                return_dict=True,
-                enable_thinking=False,
-            )
+            continuing = self._can_continue(messages, tools)
+            past_key_values = self._past_key_values if continuing else None
 
-            # Move inputs to the model's device
-            inputs = {
-                key: value.to(self.model.device)
-                for key, value in inputs.items()
+            template_kwargs = {
+                "tokenize": True,
+                "add_generation_prompt": True,
+                "return_tensors": "pt",
+                "return_dict": True,
+                "enable_thinking": False,
             }
+            if continuing:
+                # The previous assistant turn is already represented by the live cache.
+                # Feed its final uncached token, then only the newly appended user message.
+                inputs = self.processor.apply_chat_template(
+                    [messages[-1]],
+                    **template_kwargs,
+                )
+                inputs = {key: value.to(self.model.device) for key, value in inputs.items()}
+                suffix_ids = inputs["input_ids"]
+                pending_ids = self._pending_tokens.to(self.model.device)
+                inputs["input_ids"] = torch.cat((pending_ids, suffix_ids), dim=-1)
+                inputs["attention_mask"] = torch.ones(
+                    (1, past_key_values.get_seq_length() + inputs["input_ids"].shape[-1]),
+                    dtype=inputs["attention_mask"].dtype,
+                    device=self.model.device,
+                )
+                if "mm_token_type_ids" in inputs:
+                    inputs["mm_token_type_ids"] = torch.zeros_like(inputs["input_ids"])
+                logger.info(
+                    "Reusing KV cache (%d tokens); encoding only %d new prompt tokens.",
+                    past_key_values.get_seq_length(),
+                    inputs["input_ids"].shape[-1],
+                )
+            else:
+                if self._past_key_values is not None:
+                    logger.info("Conversation changed; starting a fresh KV cache.")
+                    self.reset_cache()
+                if tools is not None:
+                    template_kwargs["tools"] = tools
+                inputs = self.processor.apply_chat_template(messages, **template_kwargs)
+                inputs = {key: value.to(self.model.device) for key, value in inputs.items()}
 
             input_length = inputs["input_ids"].shape[-1]
-            if input_length >= self.max_context_length:
+            context_length = input_length + (
+                past_key_values.get_seq_length() if past_key_values is not None else 0
+            )
+            if context_length >= self.max_context_length:
                 raise ValueError(
-                    f"Input length ({input_length}) exceeds the context limit "
+                    f"Input length ({context_length}) exceeds the context limit "
                     f"({self.max_context_length})."
                 )
-            token_budget = self.max_context_length - input_length
+            token_budget = self.max_context_length - context_length
             if self.max_new_tokens is not None:
                 token_budget = min(token_budget, self.max_new_tokens)
+
+            if past_key_values is not None:
+                kwargs["past_key_values"] = past_key_values
+            kwargs["return_dict_in_generate"] = True
+            kwargs["use_cache"] = True
 
             with torch.inference_mode():
                 outputs = self.model.generate(
@@ -118,7 +159,12 @@ class Qwen(BaseLLM):
                 )
 
             # Decode only newly generated tokens
-            generated_tokens = outputs[0, input_length:]
+            sequences = outputs.sequences
+            self._past_key_values = outputs.past_key_values
+            self._pending_tokens = sequences[:, -1:].detach()
+            self._message_snapshot = [dict(message) for message in messages]
+            self._cached_tools = tools
+            generated_tokens = sequences[0, input_length:]
             response = self.processor.tokenizer.decode(
                 generated_tokens,
                 skip_special_tokens=True,
@@ -128,11 +174,39 @@ class Qwen(BaseLLM):
             if "</think>" in response:
                 response = response.split("</think>")[-1].strip()
 
-            return response.strip()
+            response = response.strip()
+            self._last_response = response
+            return response
 
         except Exception:
             logger.exception("Failed to generate response.")
             raise
+
+    def reset_cache(self):
+        """Prevent a new sample from reusing another sample's conversation cache."""
+        self._past_key_values = None
+        self._pending_tokens = None
+        self._message_snapshot = None
+        self._cached_tools = None
+        self._last_response = None
+
+    def _can_continue(self, messages, tools) -> bool:
+        if (
+            self._past_key_values is None
+            or self._pending_tokens is None
+            or self._message_snapshot is None
+            or self._cached_tools != tools
+            or len(messages) != len(self._message_snapshot) + 2
+        ):
+            return False
+
+        previous_turn = messages[-2]
+        return (
+            messages[:-2] == self._message_snapshot
+            and previous_turn.get("role") == "assistant"
+            and previous_turn.get("content") == self._last_response
+            and messages[-1].get("role") == "user"
+        )
 
 if __name__ == "__main__":
     import sys

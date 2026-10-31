@@ -46,38 +46,37 @@ class LifeMatePromptBuilder:
             },
         )
 
-    def build_tool_specs(self, installed_apps: Dict[str, dict]) -> str:
+    def build_tools(self, installed_apps: Dict[str, dict]) -> List[Dict[str, Any]]:
         names = dict.fromkeys(
             name
             for app_info in installed_apps.values()
             for name in app_info.get("tools", [])
         )
         names.setdefault("sys.ask_missing_info", None)
-        tools = [
-            {
+        tools = []
+        for name in names:
+            schema = self.tools_by_name.get(name)
+            if schema is None:
+                continue
+
+            kind = schema.get("kind", "meta" if name == "sys.ask_missing_info" else "write")
+            description = schema.get("description", "")
+            if returns := schema.get("returns"):
+                description = f"{description} Kết quả: {returns}."
+            tools.append({
                 "name": name,
-                "kind": schema.get("kind", "meta" if name == "sys.ask_missing_info" else "write"),
-                "description": schema.get("description", ""),
+                "description": f"[{kind}] {description}",
                 "parameters": schema.get("parameters", {}),
-                "returns": schema.get("returns", ""),
-            }
-            for name in names
-            if (schema := self.tools_by_name.get(name)) is not None
-        ]
-        return json.dumps(tools, ensure_ascii=False, separators=(",", ":"))
+            })
+        return tools
 
     def create_prompt(self, sample: dict, user_text: str) -> List[Dict[str, str]]:
         ctx = sample.get("context", {})
-        installed_apps = ctx.get("installed_apps", {})
-        tool_specs = self.build_tool_specs(installed_apps)
 
-        system_content = f"""Bạn là LifeMate, tác nhân thực hiện yêu cầu bằng các công cụ đã cài.
-
-Công cụ được phép và JSON Schema:
-{tool_specs}
+        system_content = """Bạn là LifeMate, tác nhân thực hiện yêu cầu bằng các công cụ đã cài. Các function khả dụng được cung cấp qua giao diện function-calling.
 
 Quy tắc:
-- Chỉ gọi công cụ trong danh sách trên. Nếu không có ứng dụng phù hợp, trả về [].
+- Chỉ gọi function được cung cấp qua giao diện function-calling. Nếu không có ứng dụng phù hợp, trả về [].
 - Thứ tự bắt buộc: (1) kiểm tra điều kiện, (2) chọn nhánh, (3) tra cứu đối tượng/ID còn thiếu, (4) thực hiện các write của nhánh. Không được đảo thứ tự này.
 - Nếu yêu cầu có điều kiện ("nếu ... thì ...", "còn nếu/không thì ..."), lượt đầu chỉ gọi read tool cần để biết kết quả điều kiện; tuyệt đối chưa write hoặc tra cứu riêng cho hành động thuộc nhánh. Ví dụ "nếu mai mưa thì dời ..., không mưa thì thôi" bắt đầu chỉ bằng weather.get_forecast. Sau khi nhận kết quả, làm đúng một nhánh; nếu kết quả chọn "thôi/giữ nguyên" thì dừng, không đổi trạng thái.
 - Dùng lịch sử hội thoại và kết quả tool trước đó để hiểu đại từ/tham chiếu như "cái còn lại"; coi các thao tác trước đã thành công là trạng thái hiện tại (ví dụ đối tượng đã xóa không còn tồn tại). Chỉ đọc lại khi cần dữ liệu mới hoặc lịch sử chưa đủ.
@@ -91,7 +90,7 @@ Quy tắc:
 - Trước mỗi write, đối chiếu với các hành động đã hoàn tất; không lặp lại cùng hành động dù thay đổi cách diễn đạt ở trường fuzzy hoặc tham số tùy chọn.
 - Sau khi mọi hành động xong, trả về []. Không lặp lại công cụ chỉ để thử lại một hành động đã thành công.
 
-Chỉ xuất một JSON array dạng [{{"name":"tool.name","arguments":{{...}}}}], hoặc [] khi không cần gọi thêm công cụ. Không viết giải thích ngoài JSON."""
+Khi cần thao tác, gọi các function phù hợp bằng giao diện function-calling. Khi không cần gọi thêm công cụ, chỉ trả về [] và không giải thích."""
 
         user_profile = ctx.get("user_profile", {})
         context_str = f"""--- NGỮ CẢNH HIỆN TẠI ---
@@ -105,7 +104,7 @@ Chỉ xuất một JSON array dạng [{{"name":"tool.name","arguments":{{...}}}}
         user_content = f"""{context_str}
 Yêu cầu mới nhất: "{user_text}"
 
-Trả về danh sách tool calls JSON:"""
+Hãy xử lý yêu cầu bằng các công cụ khả dụng; nếu không cần gọi thêm công cụ, trả về []."""
         return [
             {"role": "system", "content": system_content},
             {"role": "user", "content": user_content},

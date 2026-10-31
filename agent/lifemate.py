@@ -68,13 +68,47 @@ class LifeMateAgent:
         logger.info(f"LifeMate Agent [{self.mode.upper()}] is ready!")
 
     @staticmethod
-    def parse_json_calls(text: str):
-        """Extract JSON tool calls list from model output text."""
+    def parse_json_calls(text: str, tool_schemas: dict[str, dict] | None = None):
+        """Parse Qwen native function calls, with JSON-list compatibility."""
         text = text.strip()
         if "<think>" in text or "</think>" in text:
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
             if "</think>" in text:
                 text = text.split("</think>")[-1].strip()
+
+        native_calls = []
+        call_pattern = re.compile(
+            r"<tool_call>\s*<function=([^>\s]+)>(.*?)</function>\s*</tool_call>",
+            re.DOTALL,
+        )
+        parameter_pattern = re.compile(
+            r"<parameter=([^>\s]+)>\s*(.*?)\s*</parameter>", re.DOTALL
+        )
+        for call_match in call_pattern.finditer(text):
+            name = call_match.group(1).strip()
+            schema = (tool_schemas or {}).get(name, {})
+            properties = schema.get("parameters", {}).get("properties", {})
+            arguments = {}
+            for parameter_match in parameter_pattern.finditer(call_match.group(2)):
+                key = parameter_match.group(1).strip()
+                raw_value = parameter_match.group(2).strip()
+                value_schema = properties.get(key, {})
+                try:
+                    value = json.loads(raw_value)
+                except json.JSONDecodeError:
+                    value = raw_value
+
+                expected_type = value_schema.get("type")
+                if expected_type == "string" and not isinstance(value, str):
+                    value = raw_value
+                elif expected_type == "array" and not isinstance(value, list):
+                    value = raw_value
+                elif expected_type == "object" and not isinstance(value, dict):
+                    value = raw_value
+                arguments[key] = value
+            native_calls.append({"name": name, "arguments": arguments})
+        if native_calls:
+            return native_calls
 
         if "```" in text:
             match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
@@ -104,6 +138,8 @@ class LifeMateAgent:
         return []
 
     def predict(self, sample, max_turns: int = 10):
+        self.llm.reset_cache()
+
         # Create ToolEnv session
         id = sample.get("id")
         env = self.ToolEnv(self.mode, id)
@@ -118,6 +154,9 @@ class LifeMateAgent:
 
         # Build Prompt messages
         messages = self.prompt_builder.create_prompt(sample, audio_text)
+        tools = self.prompt_builder.build_tools(
+            sample.get("context", {}).get("installed_apps", {})
+        )
 
         all_tool_calls = []
         all_tool_results = []
@@ -129,9 +168,11 @@ class LifeMateAgent:
 
         # ReAct loop
         for turn in range(max_turns):
-            response = self.llm.chat(messages)
+            response = self.llm.chat(messages, tools=tools)
             full_responses.append(response)
-            tool_calls = self.parse_json_calls(response)
+            tool_calls = self.parse_json_calls(
+                response, self.prompt_builder.tools_by_name
+            )
             
             if not tool_calls:
                 messages.append({"role": "assistant", "content": response})
@@ -174,7 +215,7 @@ class LifeMateAgent:
                     "content": (
                         "Phát hiện lỗi cú pháp công cụ:\n"
                         + "\n".join(validation_errors)
-                        + "\nVui lòng sửa lại tên công cụ hoặc tham số và trả về mảng JSON hợp lệ:"
+                        + "\nVui lòng sửa function call theo schema công cụ đã cung cấp:"
                     ),
                 })
                 continue
