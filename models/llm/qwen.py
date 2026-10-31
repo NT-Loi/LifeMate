@@ -23,8 +23,13 @@ class Qwen(BaseLLM):
 
 
         if dtype is None:
-            if self.device.startswith("cuda") or (self.device == "auto" and torch.cuda.is_available()):
-                dtype = "bfloat16" if torch.cuda.is_bf16_supported() else "float16"
+            uses_cuda = torch.cuda.is_available() and (
+                self.device.startswith("cuda") or self.device == "auto"
+            )
+            if uses_cuda:
+                device = self.device if self.device.startswith("cuda:") else None
+                native_bf16 = torch.cuda.get_device_capability(device)[0] >= 8
+                dtype = "bfloat16" if native_bf16 else "float16"
             else:
                 dtype = "bfloat16"
 
@@ -34,7 +39,9 @@ class Qwen(BaseLLM):
 
         # 4-bit NF4 Quantization
         quantization_config = None
-        if is_quantized and self.device.startswith("cuda"):
+        if is_quantized and torch.cuda.is_available() and (
+            self.device.startswith("cuda") or self.device == "auto"
+        ):
             try:
                 from transformers import BitsAndBytesConfig 
                 quantization_config = BitsAndBytesConfig(
@@ -143,6 +150,14 @@ class Qwen(BaseLLM):
             token_budget = self.max_context_length - context_length
             if self.max_new_tokens is not None:
                 token_budget = min(token_budget, self.max_new_tokens)
+            logger.info(
+                "Generation input: prompt_tokens=%d cached_tokens=%d context_tokens=%d max_context=%d max_new_tokens=%d",
+                input_length,
+                past_key_values.get_seq_length() if past_key_values is not None else 0,
+                context_length,
+                self.max_context_length,
+                token_budget,
+            )
 
             if past_key_values is not None:
                 kwargs["past_key_values"] = past_key_values

@@ -1,11 +1,16 @@
 import argparse
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime
+import gc
 import json
 import os
 from pathlib import Path
+from queue import Empty
 import re
 import shutil
+import sys
+import time
 from typing import Any
 import unicodedata
 
@@ -17,7 +22,6 @@ from agent.lifemate import LifeMateAgent
 from config import MODE
 
 import logging
-import sys
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -25,6 +29,117 @@ logging.basicConfig(
     force=True,
 )
 logger = logging.getLogger(__name__)
+
+
+class _Tee:
+    def __init__(self, terminal, log_file):
+        self.terminal = terminal
+        self.log_file = log_file
+
+    @property
+    def encoding(self):
+        return getattr(self.terminal, "encoding", "utf-8")
+
+    def write(self, text):
+        self.terminal.write(text)
+        self.log_file.write(text)
+        self.log_file.flush()
+        return len(text)
+
+    def flush(self):
+        self.terminal.flush()
+        self.log_file.flush()
+
+    def isatty(self):
+        return self.terminal.isatty()
+
+    def fileno(self):
+        return self.terminal.fileno()
+
+
+@contextmanager
+def _capture_output(log_path: Path | str):
+    """Keep terminal output and Python log records in a per-process log file."""
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8", buffering=1) as log_file:
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        file_handler = logging.StreamHandler(log_file)
+        file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s - %(processName)s - %(name)s - %(levelname)s - %(message)s"
+        ))
+        root_logger = logging.getLogger()
+        root_logger.addHandler(file_handler)
+        sys.stdout = _Tee(old_stdout, log_file)
+        sys.stderr = _Tee(old_stderr, log_file)
+        try:
+            yield
+        finally:
+            sys.stdout, sys.stderr = old_stdout, old_stderr
+            root_logger.removeHandler(file_handler)
+            file_handler.close()
+
+
+def _error_result(sample: dict, error: Exception) -> dict:
+    result = {
+        "id": sample.get("id"),
+        "audio_text": sample.get("audio_text", ""),
+        "score": 0.0,
+        "state_match": False,
+        "p": 0.0,
+        "r": 0.0,
+        "f1": 0.0,
+        "sub_calls": [],
+        "gold_calls": sample.get("label", {}).get("tool_calls", []),
+        "sub_hash": "",
+        "gold_hash": "",
+        "messages": [],
+        "tool_results": [],
+        "error": f"{type(error).__name__}: {error}",
+    }
+    if hasattr(error, "elapsed_seconds"):
+        result["elapsed_seconds"] = error.elapsed_seconds
+    return result
+
+
+def _recover_after_error(
+    agent: LifeMateAgent | None,
+    error: Exception,
+    device: str | None = None,
+):
+    if agent is not None:
+        agent.llm.reset_cache()
+    if not (isinstance(error, MemoryError) or "out of memory" in str(error).lower()):
+        return
+
+    gc.collect()
+    if torch.cuda.is_available():
+        device = device or getattr(getattr(agent, "llm", None), "device", None)
+        if device == "auto" or device is None:
+            gpu_ids = range(torch.cuda.device_count())
+        elif str(device).startswith("cuda:"):
+            gpu_ids = [int(str(device).split(":", 1)[1])]
+        elif str(device).startswith("cuda"):
+            gpu_ids = [torch.cuda.current_device()]
+        else:
+            gpu_ids = []
+
+        for gpu_id in gpu_ids:
+            try:
+                with torch.cuda.device(gpu_id):
+                    torch.cuda.empty_cache()
+                    free, total = torch.cuda.mem_get_info(gpu_id)
+                    logger.error(
+                        "GPU %d memory after OOM recovery: allocated=%.2f GiB, reserved=%.2f GiB, free=%.2f/%.2f GiB",
+                        gpu_id,
+                        torch.cuda.memory_allocated(gpu_id) / 1024**3,
+                        torch.cuda.memory_reserved(gpu_id) / 1024**3,
+                        free / 1024**3,
+                        total / 1024**3,
+                    )
+            except Exception:
+                logger.exception("Could not recover or read CUDA memory stats for GPU %d.", gpu_id)
+
 
 def get_fuzzy_props(catalog_path: str | Path) -> dict[str, set[str]]:
     """Trích xuất danh sách các thuộc tính fuzzy (x-match: fuzzy) từ catalog."""
@@ -170,7 +285,7 @@ def format_conversation(ev: dict) -> str:
     return "\n".join(lines)
 
 
-def process_single_sample(agent: LifeMateAgent, sample: dict, fuzzy_map: dict, mode: str) -> dict:
+def _process_single_sample(agent: LifeMateAgent, sample: dict, fuzzy_map: dict, mode: str) -> dict:
     """Xử lý và chấm điểm 1 sample, lưu trữ cả thông tin chạy, lịch sử hội thoại và kết quả điểm."""
     sid = sample["id"]
     gold_calls = sample.get("label", {}).get("tool_calls", [])
@@ -199,6 +314,21 @@ def process_single_sample(agent: LifeMateAgent, sample: dict, fuzzy_map: dict, m
     return ev
 
 
+def process_single_sample(agent: LifeMateAgent, sample: dict, fuzzy_map: dict, mode: str) -> dict:
+    started = time.perf_counter()
+    try:
+        result = _process_single_sample(agent, sample, fuzzy_map, mode)
+    except Exception as error:
+        elapsed = round(time.perf_counter() - started, 3)
+        error.elapsed_seconds = elapsed
+        logger.info("Sample %s failed after %.2f seconds.", sample.get("id"), elapsed)
+        raise
+
+    result["elapsed_seconds"] = round(time.perf_counter() - started, 3)
+    logger.info("Sample %s completed in %.2f seconds.", sample.get("id"), result["elapsed_seconds"])
+    return result
+
+
 def _worker_process(
     gpu_id: int | str,
     sub_samples: list[dict],
@@ -206,37 +336,32 @@ def _worker_process(
     model_id: str | None,
     llm_kwargs: dict,
     out_queue: Any,
+    log_path: str,
 ):
     """Worker tiến trình chạy trên 1 GPU riêng biệt."""
     device = f"cuda:{gpu_id}" if str(gpu_id).isdigit() else str(gpu_id)
-    if device.startswith("cuda:") and torch.cuda.is_available():
-        torch.cuda.set_device(int(gpu_id))
-
-    agent = LifeMateAgent(asr=None, model_id=model_id, mode=mode, device=device, **llm_kwargs)
-    fuzzy_map = get_fuzzy_props(agent.catalog_path)
-
-    for i, sample in enumerate(sub_samples, 1):
+    with _capture_output(log_path):
+        logger.info("Starting worker on %s for %d samples.", device, len(sub_samples))
         try:
-            ev = process_single_sample(agent, sample, fuzzy_map, mode)
-            out_queue.put(ev)
+            if device.startswith("cuda:") and torch.cuda.is_available():
+                torch.cuda.set_device(int(gpu_id))
+            agent = LifeMateAgent(asr=None, model_id=model_id, mode=mode, device=device, **llm_kwargs)
+            fuzzy_map = get_fuzzy_props(agent.catalog_path)
         except Exception as e:
-            print(f"[{device.upper()}] Lỗi xử lý {sample.get('id')}: {e}", flush=True)
-            out_queue.put({
-                "id": sample.get("id"),
-                "audio_text": sample.get("audio_text", ""),
-                "score": 0.0,
-                "state_match": False,
-                "p": 0.0,
-                "r": 0.0,
-                "f1": 0.0,
-                "sub_calls": [],
-                "gold_calls": sample.get("label", {}).get("tool_calls", []),
-                "sub_hash": "",
-                "gold_hash": "",
-                "messages": [],
-                "tool_results": [],
-                "error": str(e),
-            })
+            logger.exception("Worker %s failed while initializing its model.", device)
+            _recover_after_error(None, e, device=device)
+            for sample in sub_samples:
+                out_queue.put(_error_result(sample, e))
+            return
+
+        for sample in sub_samples:
+            try:
+                ev = process_single_sample(agent, sample, fuzzy_map, mode)
+                out_queue.put(ev)
+            except Exception as e:
+                logger.exception("Worker %s failed on sample %s.", device, sample.get("id"))
+                _recover_after_error(agent, e, device=device)
+                out_queue.put(_error_result(sample, e))
 
 
 def save_evaluation_results(
@@ -275,10 +400,17 @@ def save_evaluation_results(
 
     # 4. Lưu tổng kết chỉ số (eval_summary.json)
     n = len(results)
+    failed_sample_ids = [r.get("id") for r in results if r.get("error")]
+    sample_times = [r["elapsed_seconds"] for r in results if "elapsed_seconds" in r]
     summary = {
         "timestamp": datetime.now().isoformat(),
         "mode": mode,
         "num_samples": n,
+        "error_count": len(failed_sample_ids),
+        "failed_sample_ids": failed_sample_ids,
+        "mean_elapsed_seconds": round(sum(sample_times) / len(sample_times), 3) if sample_times else None,
+        "max_elapsed_seconds": round(max(sample_times), 3) if sample_times else None,
+        "samples_over_30_seconds": sum(seconds > 30 for seconds in sample_times),
         "model_id": model_id or "default",
         "gpus": gpus,
         "state_match_acc": round(sum(1.0 for r in results if r.get("state_match")) / n, 4) if n else 0.0,
@@ -291,6 +423,8 @@ def save_evaluation_results(
             "eval_details": str(details_path),
             "conversations": str(conv_path),
             "eval_summary": str(output_dir / "eval_summary.json"),
+            "run_log": str(output_dir / "run.log"),
+            "worker_logs": [str(path) for path in sorted(output_dir.glob("worker_*.log"))],
         }
     }
     summary_path = output_dir / "eval_summary.json"
@@ -305,8 +439,12 @@ def save_evaluation_results(
         shutil.copyfile(details_path, latest_dir / "eval_details.jsonl")
         shutil.copyfile(conv_path, latest_dir / "conversations.txt")
         shutil.copyfile(summary_path, latest_dir / "eval_summary.json")
+        for stale_log in latest_dir.glob("worker_*.log"):
+            stale_log.unlink()
+        for worker_log in output_dir.glob("worker_*.log"):
+            shutil.copyfile(worker_log, latest_dir / worker_log.name)
     except Exception:
-        pass
+        logger.exception("Could not refresh eval_results/latest.")
 
     return summary
 
@@ -349,7 +487,7 @@ def print_summary(results: list[dict], output_dir: Path | str | None = None):
             print("=" * 60)
 
 
-def run_evaluation(
+def _run_evaluation(
     samples: list[dict],
     mode: str = "train",
     gpus: list[int] | str | None = None,
@@ -389,6 +527,8 @@ def run_evaluation(
     raw_conv_file = open(output_dir / "conversations.txt", "w", encoding="utf-8")
 
     def _record_sample(ev: dict):
+        if ev.get("error"):
+            logger.error("Sample %s failed: %s", ev.get("id"), ev["error"])
         pred_item = {
             "id": ev["id"],
             "tool_calls": ev.get("sub_calls", []),
@@ -413,23 +553,9 @@ def run_evaluation(
                 try:
                     ev = process_single_sample(agent, sample, fuzzy_map, mode)
                 except Exception as e:
-                    print(f"\n[ERROR] Lỗi xử lý {sample.get('id')}: {e}", flush=True)
-                    ev = {
-                        "id": sample.get("id"),
-                        "audio_text": sample.get("audio_text", ""),
-                        "score": 0.0,
-                        "state_match": False,
-                        "p": 0.0,
-                        "r": 0.0,
-                        "f1": 0.0,
-                        "sub_calls": [],
-                        "gold_calls": sample.get("label", {}).get("tool_calls", []),
-                        "sub_hash": "",
-                        "gold_hash": "",
-                        "messages": [],
-                        "tool_results": [],
-                        "error": str(e),
-                    }
+                    logger.exception("Failed to evaluate sample %s.", sample.get("id"))
+                    _recover_after_error(agent, e)
+                    ev = _error_result(sample, e)
                 results.append(ev)
                 _record_sample(ev)
 
@@ -458,15 +584,39 @@ def run_evaluation(
                 continue
             p = ctx.Process(
                 target=_worker_process,
-                args=(gpu_id, sub_samples, mode, model_id, llm_kwargs, queue),
+                args=(
+                    gpu_id,
+                    sub_samples,
+                    mode,
+                    model_id,
+                    llm_kwargs,
+                    queue,
+                    str(output_dir / f"worker_{gpu_id}.log"),
+                ),
             )
             p.start()
             processes.append(p)
 
         results = []
         with tqdm(total=len(samples), desc=f"Evaluating (GPUs {gpus})", unit="sample") as pbar:
-            for _ in range(len(samples)):
-                ev = queue.get()
+            while len(results) < len(samples):
+                try:
+                    ev = queue.get(timeout=5)
+                except Empty:
+                    if all(not process.is_alive() for process in processes):
+                        completed_ids = {result.get("id") for result in results}
+                        missing_ids = [sample["id"] for sample in samples if sample["id"] not in completed_ids]
+                        exit_codes = [process.exitcode for process in processes]
+                        logger.error(
+                            "All GPU workers exited before returning %d samples; missing=%s exit_codes=%s",
+                            len(missing_ids),
+                            missing_ids,
+                            exit_codes,
+                        )
+                        raise RuntimeError(
+                            f"GPU worker exited before returning samples {missing_ids}; exit codes: {exit_codes}"
+                        )
+                    continue
                 results.append(ev)
                 _record_sample(ev)
 
@@ -483,6 +633,9 @@ def run_evaluation(
 
         for p in processes:
             p.join()
+        failed_workers = [p.exitcode for p in processes if p.exitcode not in (0, None)]
+        if failed_workers:
+            logger.error("GPU workers exited with non-zero codes after returning results: %s", failed_workers)
 
         raw_pred_file.close()
         raw_details_file.close()
@@ -508,23 +661,9 @@ def run_evaluation(
             try:
                 ev = process_single_sample(agent, sample, fuzzy_map, mode)
             except Exception as e:
-                print(f"\n[ERROR] Lỗi xử lý {sample.get('id')}: {e}", flush=True)
-                ev = {
-                    "id": sample.get("id"),
-                    "audio_text": sample.get("audio_text", ""),
-                    "score": 0.0,
-                    "state_match": False,
-                    "p": 0.0,
-                    "r": 0.0,
-                    "f1": 0.0,
-                    "sub_calls": [],
-                    "gold_calls": sample.get("label", {}).get("tool_calls", []),
-                    "sub_hash": "",
-                    "gold_hash": "",
-                    "messages": [],
-                    "tool_results": [],
-                    "error": str(e),
-                }
+                logger.exception("Failed to evaluate sample %s.", sample.get("id"))
+                _recover_after_error(agent, e)
+                ev = _error_result(sample, e)
             results.append(ev)
             _record_sample(ev)
 
@@ -542,6 +681,51 @@ def run_evaluation(
     return results
 
 
+def run_evaluation(
+    samples: list[dict],
+    mode: str = "train",
+    gpus: list[int] | str | None = None,
+    output_dir: Path | str | None = None,
+    model_id: str | None = None,
+    **llm_kwargs,
+) -> list[dict]:
+    if not samples:
+        print("Không có mẫu nào để đánh giá.")
+        return []
+
+    if output_dir is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = Path("eval_results") / f"{mode}_{timestamp}"
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if llm_kwargs.get("max_new_tokens") is None:
+        llm_kwargs["max_new_tokens"] = 512
+
+    run_log = output_dir / "run.log"
+    try:
+        with _capture_output(run_log):
+            logger.info(
+                "Evaluation started: mode=%s samples=%d model=%s max_new_tokens=%s",
+                mode,
+                len(samples),
+                model_id or "default",
+                llm_kwargs["max_new_tokens"],
+            )
+            return _run_evaluation(
+                samples=samples,
+                mode=mode,
+                gpus=gpus,
+                output_dir=output_dir,
+                model_id=model_id,
+                **llm_kwargs,
+            )
+    finally:
+        if run_log.is_file():
+            latest_dir = output_dir.parent / "latest"
+            latest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(run_log, latest_dir / "run.log")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Đánh giá LifeMate Agent (ZAC 2026)")
     parser.add_argument("--mode", type=str, default="train", choices=["train", "public_test"], help="Tập dữ liệu đánh giá")
@@ -550,6 +734,7 @@ def main():
     parser.add_argument("--gpus", type=str, default=None, help="Danh sách GPU (ví dụ: '0,1' hoặc 'auto' hoặc '0')")
     parser.add_argument("--output-dir", type=str, default=None, help="Thư mục lưu kết quả (mặc định: eval_results/<mode>_<timestamp>)")
     parser.add_argument("--model-id", type=str, default=None, help="Hugging Face Model ID tùy chọn")
+    parser.add_argument("--max-new-tokens", type=int, default=512, help="Giới hạn token mới mỗi lượt để giảm VRAM (mặc định: 512)")
     args = parser.parse_args()
 
     mode = args.mode
@@ -573,6 +758,7 @@ def main():
         gpus=args.gpus,
         output_dir=args.output_dir,
         model_id=args.model_id,
+        max_new_tokens=args.max_new_tokens,
     )
 
 
