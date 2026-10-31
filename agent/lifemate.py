@@ -84,8 +84,11 @@ class LifeMateAgent:
         parameter_pattern = re.compile(
             r"<parameter=([^>\s]+)>\s*(.*?)\s*</parameter>", re.DOTALL
         )
-        for call_match in call_pattern.finditer(text):
+        native_matches = list(call_pattern.finditer(text))
+        for call_match in native_matches:
             name = call_match.group(1).strip()
+            if name == "[]":
+                continue
             schema = (tool_schemas or {}).get(name, {})
             properties = schema.get("parameters", {}).get("properties", {})
             arguments = {}
@@ -107,7 +110,7 @@ class LifeMateAgent:
                     value = raw_value
                 arguments[key] = value
             native_calls.append({"name": name, "arguments": arguments})
-        if native_calls:
+        if native_matches:
             return native_calls
 
         if "```" in text:
@@ -126,6 +129,8 @@ class LifeMateAgent:
                     calls = []
                     for call in parsed:
                         if not isinstance(call, dict) or not isinstance(call.get("name"), str):
+                            continue
+                        if call["name"] == "[]":
                             continue
                         arguments = call.get("arguments", {})
                         if arguments is None:
@@ -163,7 +168,6 @@ class LifeMateAgent:
         full_responses = []
 
         executed_sigs = set()
-        executed_summary = []
         prev_turn_sigs = None
 
         # ReAct loop
@@ -192,7 +196,8 @@ class LifeMateAgent:
             turn_sigs = [(c.get("name", ""), json.dumps(c.get("arguments", {}), sort_keys=True)) for c in tool_calls]
             if prev_turn_sigs is not None and turn_sigs == prev_turn_sigs:
                 logger.warning(f"Phát hiện vòng lặp lặp lại chính xác ở lượt {turn + 1}. Dừng ReAct loop.")
-                messages.append({"role": "assistant", "content": response})
+                messages.append({"role": "assistant", "content": "[]"})
+                self.llm.reset_cache()
                 break
 
             # Validate tool calls with env.validate first
@@ -222,50 +227,52 @@ class LifeMateAgent:
 
             # Execute valid tool calls in env (skip duplicate calls)
             turn_results = []
+            executed_this_turn = []
             new_calls_executed = 0
+            duplicate_calls_skipped = 0
             for call in tool_calls:
                 name = call.get("name", "")
                 args = call.get("arguments", {})
                 sig = (name, json.dumps(args, sort_keys=True))
-                kind = env.kind(name)
 
                 if sig in executed_sigs:
                     logger.info(f"Bỏ qua công cụ đã thực thi trước đó: {name} {args}")
+                    duplicate_calls_skipped += 1
                     continue
 
                 res = env.call(name, args)
                 turn_results.append(res)
                 executed_sigs.add(sig)
-                executed_summary.append(f"- {name} {args} (loại: {kind})")
                 all_tool_calls.append(call)
                 all_tool_results.append(res)
+                executed_this_turn.append(call)
                 new_calls_executed += 1
+
+            if duplicate_calls_skipped:
+                logger.info(
+                    "Removed %d duplicate tool call(s) from conversation history; "
+                    "rebuilding KV cache from the cleaned conversation.",
+                    duplicate_calls_skipped,
+                )
+                self.llm.reset_cache()
 
             if new_calls_executed == 0:
                 logger.info("Không có hành động mới nào cần thực thi trong lượt này. Dừng ReAct loop.")
-                messages.append({"role": "assistant", "content": response})
+                messages.append({"role": "assistant", "content": "[]"})
                 break
 
             if any(call["name"] == "sys.ask_missing_info" for call in tool_calls):
                 break
 
             prev_turn_sigs = turn_sigs
-            messages.append({"role": "assistant", "content": response})
+            history_response = response
+            if duplicate_calls_skipped:
+                history_response = json.dumps(executed_this_turn, ensure_ascii=False)
+            messages.append({"role": "assistant", "content": history_response})
 
             feedback_content = (
                 f"Kết quả thực thi công cụ ở lượt vừa rồi:\n"
-                f"{json.dumps(turn_results, ensure_ascii=False, indent=2)}\n\n"
-                f"Các công cụ ĐÃ THỰC THI từ đầu đến giờ:\n"
-                + "\n".join(executed_summary)
-                + f"\n\nYêu cầu ban đầu của người dùng: \"{audio_text}\"\n\n"
-                f"HƯỚNG DẪN XỬ LÝ LƯỢT TIẾP THEO:\n"
-                f"1. Phân tích kết quả tra cứu vừa nhận được (kiểm tra điều kiện logic, ID đối tượng, trạng thái hiện tại).\n"
-                f"2. Đánh giá logic điều kiện (nếu yêu cầu có dạng 'Nếu... thì...'):\n"
-                f"   - Chỉ thực hiện hành động thuộc nhánh khớp với kết quả; không chạy nhánh đối lập. Điều kiện sai vẫn có thể có nhánh 'còn nếu/không thì'. Nếu nhánh đúng nói 'thôi/giữ nguyên' hoặc không có hành động, trả về [] ngay; tuyệt đối không gọi các write phụ thuộc điều kiện.\n"
-                f"   - Nếu còn thiếu đối tượng/ID cho nhánh được chọn, gọi read tool tương ứng rồi mới write. Với yêu cầu 'dời/đổi/chuyển/hoãn' mục có sẵn, tìm mục hiện tại rồi update, không create. Với x-ref, dùng ID trả về, không dùng tên thay ID.\n"
-                f"3. Phân rã yêu cầu thành các hành động còn thiếu, gồm các hành động vô điều kiện; đối chiếu với 'Các công cụ ĐÃ THỰC THI' để không lặp lại hành động đã xong. Gửi riêng từng hành động được yêu cầu; nhắn tin không thay thế cho cập nhật trạng thái app. Bỏ các tham số tùy chọn không cần và giữ nội dung tin nhắn ngắn, sát yêu cầu.\n"
-                f"4. Khi cập nhật (update/set/modify), chỉ truyền ID và các trường giá trị mới cần thay đổi; khi đổi giờ, giữ nguyên thời lượng nếu không được yêu cầu đổi.\n"
-                f"5. Khi các hành động của nhánh được chọn và các hành động vô điều kiện đã xong, trả về []. Không lặp lại cùng một hành động đã chạy thành công, kể cả khi đổi câu chữ ở tham số fuzzy."
+                f"{json.dumps(turn_results, ensure_ascii=False, indent=2)}"
             )
             messages.append({"role": "user", "content": feedback_content})
 
