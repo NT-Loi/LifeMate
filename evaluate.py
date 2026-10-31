@@ -748,12 +748,21 @@ def main():
     parser.add_argument("--mode", type=str, default="train", choices=["train", "public_test"], help="Tập dữ liệu đánh giá")
     parser.add_argument("--num-samples", type=int, default=10, help="Số lượng mẫu (-1 để chạy hết, mặc định: 10)")
     parser.add_argument("--id", type=str, default=None, help="Đánh giá duy nhất 1 sample ID (ví dụ: train_0001)")
+    parser.add_argument("--ids-file", type=Path, default=None, help="JSON array sample IDs cần đánh giá")
     parser.add_argument("--gpus", type=str, default=None, help="Danh sách GPU (ví dụ: '0,1' hoặc 'auto' hoặc '0')")
     parser.add_argument("--output-dir", type=str, default=None, help="Thư mục lưu kết quả (mặc định: eval_results/<mode>_<timestamp>)")
     parser.add_argument("--model-id", type=str, default=None, help="Hugging Face Model ID tùy chọn")
     parser.add_argument("--max-new-tokens", type=int, default=512, help="Giới hạn token mới mỗi lượt để giảm VRAM (mặc định: 512)")
     parser.add_argument("--thinking", action="store_true", help="Bật thinking mode cho Qwen")
     args = parser.parse_args()
+
+    if args.id and args.ids_file:
+        parser.error("Use either --id or --ids-file, not both")
+    requested_ids = None
+    if args.ids_file:
+        requested_ids = set(json.loads(args.ids_file.read_text(encoding="utf-8")))
+        if not requested_ids:
+            parser.error("--ids-file must contain at least one sample ID")
 
     mode = args.mode
     data_path = MODE[mode]["data_path"]
@@ -766,9 +775,24 @@ def main():
                 item = json.loads(line)
                 if args.id and item.get("id") != args.id:
                     continue
+                if requested_ids is not None and item.get("id") not in requested_ids:
+                    continue
                 samples.append(item)
-                if not args.id and args.num_samples > 0 and len(samples) >= args.num_samples:
+                if requested_ids is not None and len(samples) == len(requested_ids):
                     break
+                if (
+                    not args.id
+                    and requested_ids is None
+                    and args.num_samples > 0
+                    and len(samples) >= args.num_samples
+                ):
+                    break
+
+    if requested_ids is not None:
+        found_ids = {sample.get("id") for sample in samples}
+        missing_ids = requested_ids - found_ids
+        if missing_ids:
+            raise SystemExit(f"Sample IDs not found in {data_path}: {', '.join(sorted(missing_ids))}")
 
     run_evaluation(
         samples=samples,

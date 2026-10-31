@@ -1,0 +1,4 @@
+# Install after `uv sync --python 3.12 --extra gcp-l4`.
+datasets==4.7.0
+peft==0.21.2
+trl==1.16.0

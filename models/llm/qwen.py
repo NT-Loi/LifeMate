@@ -1,5 +1,7 @@
 from .base import BaseLLM
 import re
+import json
+from pathlib import Path
 import torch
 from transformers import AutoModelForMultimodalLM, AutoProcessor
 
@@ -56,15 +58,30 @@ class Qwen(BaseLLM):
                 logger.warning(f"⚠️ Could't initialize BitsAndBytesConfig ({e}).")
                 quantization_config = None
 
+        model_path = Path(model_id).expanduser()
+        if model_path.is_dir():
+            model_id = str(model_path.resolve())
+        adapter_config_path = Path(model_id) / "adapter_config.json"
+        self.adapter_path = None
+        base_model_id = model_id
+        if adapter_config_path.is_file():
+            adapter_config = json.loads(adapter_config_path.read_text(encoding="utf-8"))
+            base_model_id = adapter_config["base_model_name_or_path"]
+            self.adapter_path = model_id
+
         logger.info(f"🤖 Loading {model_id} (device={self.device}, dtype={dtype}, is_quantized={is_quantized})...")
         
         try:
-            revision = MODEL_REVISIONS.get(model_id)
+            revision = MODEL_REVISIONS.get(base_model_id)
             load_kwargs = {"local_files_only": True}
             if revision:
                 load_kwargs["revision"] = revision
 
-            self.processor = AutoProcessor.from_pretrained(model_id, **load_kwargs)
+            processor_source = model_id if self.adapter_path else base_model_id
+            processor_kwargs = {"local_files_only": True}
+            if processor_source == base_model_id and revision:
+                processor_kwargs["revision"] = revision
+            self.processor = AutoProcessor.from_pretrained(processor_source, **processor_kwargs)
 
             load_kwargs["dtype"] = dtype
 
@@ -80,7 +97,11 @@ class Qwen(BaseLLM):
                 else:
                     load_kwargs["device_map"] = self.device
 
-            self.model = AutoModelForMultimodalLM.from_pretrained(model_id, **load_kwargs)
+            self.model = AutoModelForMultimodalLM.from_pretrained(base_model_id, **load_kwargs)
+            if self.adapter_path:
+                from peft import PeftModel
+
+                self.model = PeftModel.from_pretrained(self.model, self.adapter_path)
             self.model.eval()
 
             total_params = sum(p.numel() for p in self.model.parameters())

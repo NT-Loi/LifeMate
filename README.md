@@ -68,5 +68,24 @@ uv run python evaluate.py --model-id Qwen/Qwen3.5-2B
 uv run python evaluate.py --num-samples -1 --gpus 0,1
 ```
 
+## SFT + QLoRA
+
+The training script uses only `audio_text` and labels from the train split, so it does not run ASR or read environment state files. It reconstructs each labeled tool call followed by its recorded tool result, holds out 10% of original samples for validation, and skips turns longer than the configured context length. The loss is on tool-call/`[]` outputs; the data has no gold reasoning traces to train thinking.
+
+On the GCP L4 VM, install the training packages and train the 4B model:
+
+```bash
+uv pip install -r agent/requirements-sft.txt
+uv run --no-sync python -m agent.train_sft --output-dir outputs/lifemate-qwen35-4b-sft
+```
+
+The resulting adapter can be passed as `--model-id`. Evaluate the held-out train samples using the ID list written by the training run:
+
+```bash
+uv run --no-sync python evaluate.py --mode train \
+  --ids-file outputs/lifemate-qwen35-4b-sft/validation_ids.json \
+  --model-id outputs/lifemate-qwen35-4b-sft
+```
+
 ## Kaggle Notebook (T4 x 2 GPU)
 You can upload or open [kaggle_evaluation.ipynb](kaggle_evaluation.ipynb) on Kaggle with the `GPU T4 x 2` accelerator. It utilizes both T4 GPUs simultaneously via data-parallel workers, doubling evaluation throughput.
