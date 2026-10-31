@@ -87,6 +87,15 @@ uv run --no-sync python evaluate.py --mode train \
   --model-id outputs/lifemate-qwen35-4b-sft
 ```
 
+The output directory contains the BF16 LoRA adapter, `training_log.json` (training and validation metrics), and a `base-4bit/` directory with the exact NF4 base checkpoint used for training. To serve both with vLLM, install its BitsAndBytes plugin and run:
+
+```bash
+uv pip install vllm-bnb-plugin
+uv run --no-sync bash agent/serve_vllm.sh outputs/lifemate-qwen35-4b-sft
+```
+
+The serve script checks that the saved base is NF4 4-bit, then lets vLLM load that pre-quantized checkpoint with the adapter. It does not ask vLLM to quantize the original BF16 model again.
+
 Training saves a checkpoint at the end of each epoch. To continue after the first epoch, set `--epochs` to the new total epoch count and resume from that epoch's checkpoint, for example:
 
 ```bash

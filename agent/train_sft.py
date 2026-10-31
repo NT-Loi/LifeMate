@@ -201,6 +201,24 @@ def main():
     model = AutoModelForMultimodalLM.from_pretrained(args.model_id, **model_kwargs)
     model.config.use_cache = False
     model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+
+    # Keep the exact quantized base used by QLoRA so serving can load it directly.
+    base_output_dir = args.output_dir / "base-4bit"
+    model.config.use_cache = True
+    model.save_pretrained(base_output_dir, safe_serialization=True)
+    processor.save_pretrained(base_output_dir)
+    saved_quantization = json.loads(
+        (base_output_dir / "config.json").read_text(encoding="utf-8")
+    ).get("quantization_config", {})
+    if not (
+        saved_quantization.get("load_in_4bit")
+        and saved_quantization.get("bnb_4bit_quant_type") == "nf4"
+        and saved_quantization.get("bnb_4bit_use_double_quant")
+    ):
+        raise RuntimeError(f"Saved base is not the expected NF4 4-bit checkpoint: {saved_quantization}")
+    model.config.use_cache = False
+    logger.info("Saved quantized base model to %s", base_output_dir)
+
     lora_config = LoraConfig(
         r=16,
         lora_alpha=32,
@@ -250,13 +268,24 @@ def main():
             str(args.resume_from_checkpoint) if args.resume_from_checkpoint else None
         )
     )
+    (args.output_dir / "training_log.json").write_text(
+        json.dumps(trainer.state.log_history, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    for name, parameter in trainer.model.named_parameters():
+        if "lora_" in name and parameter.is_floating_point():
+            parameter.data = parameter.data.to(compute_dtype)
     trainer.save_model(str(args.output_dir))
     processor.save_pretrained(args.output_dir)
     (args.output_dir / "validation_ids.json").write_text(
         json.dumps(sorted(sample["id"] for sample in validation_samples), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    logger.info("Saved QLoRA adapter and processor to %s", args.output_dir)
+    logger.info(
+        "Saved %s LoRA adapter, processor, and 4-bit base to %s",
+        str(compute_dtype).removeprefix("torch."), args.output_dir,
+    )
 
 
 if __name__ == "__main__":
