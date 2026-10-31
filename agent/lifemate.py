@@ -30,6 +30,7 @@ class LifeMateAgent:
         self,
         asr: str | None = "Gipformer",
         model_id: str | None = None,
+        enable_thinking: bool = False,
         mode: str = "train",
         device: str | None = None,
         data_dir: str | Path | None = None,
@@ -57,7 +58,11 @@ class LifeMateAgent:
         if device:
             llm_kwargs["device"] = device
         logger.info("Initialize LLM: model_id=%s (device=%s)", model_id or "default", device)
-        self.llm = get_llm(model_id=model_id, **llm_kwargs)
+        self.llm = get_llm(
+            model_id=model_id,
+            enable_thinking=enable_thinking,
+            **llm_kwargs,
+        )
 
         # Load ToolEnv 
         self.ToolEnv = get_tool_env(self.mode)
@@ -173,11 +178,11 @@ class LifeMateAgent:
         # ReAct loop
         for turn in range(max_turns):
             response = self.llm.chat(messages, tools=tools)
-            full_responses.append(response)
+            full_responses.append(getattr(self.llm, "last_raw_response", None) or response)
             tool_calls = self.parse_json_calls(
                 response, self.prompt_builder.tools_by_name
             )
-            
+
             if not tool_calls:
                 messages.append({"role": "assistant", "content": response})
                 break  
@@ -312,6 +317,7 @@ if __name__ == "__main__":
             "train_0026",
         ],
     )
+    parser.add_argument("--thinking", action="store_true", help="Enable Qwen thinking mode")
     parser.add_argument("--max-turns", type=int, default=10)
     parser.add_argument("--max-new-tokens", type=int, default=1024)
     args = parser.parse_args()
@@ -337,6 +343,7 @@ if __name__ == "__main__":
         model_id=args.model_id,
         mode=mode,
         max_new_tokens=args.max_new_tokens,
+        enable_thinking=args.thinking,
     )
     for sample_id in args.ids:
         sample = samples[sample_id]

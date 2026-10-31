@@ -15,9 +15,10 @@ MODEL_REVISIONS = {
 class Qwen(BaseLLM):
     def __init__(self, model_id: str = MODEL_ID, max_context_length: int = 16384, 
                 is_quantized: bool = True, dtype: str = None, device: str = None,
-                max_new_tokens: int | None = None):
+                max_new_tokens: int | None = None, enable_thinking: bool = False):
         self.max_context_length = min(max_context_length, 16384)
         self.max_new_tokens = max_new_tokens
+        self.enable_thinking = enable_thinking
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.reset_cache()
 
@@ -104,7 +105,7 @@ class Qwen(BaseLLM):
                 "add_generation_prompt": True,
                 "return_tensors": "pt",
                 "return_dict": True,
-                "enable_thinking": False,
+                "enable_thinking": self.enable_thinking,
             }
             if continuing:
                 # The previous assistant turn is already represented by the live cache.
@@ -180,11 +181,14 @@ class Qwen(BaseLLM):
             self._message_snapshot = [dict(message) for message in messages]
             self._cached_tools = tools
             generated_tokens = sequences[0, input_length:]
+            self.last_raw_response = self.processor.tokenizer.decode(
+                generated_tokens,
+                skip_special_tokens=False,
+            ).strip()
             response = self.processor.tokenizer.decode(
                 generated_tokens,
                 skip_special_tokens=True,
             )
-
             response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
             if "</think>" in response:
                 response = response.split("</think>")[-1].strip()
@@ -204,6 +208,7 @@ class Qwen(BaseLLM):
         self._message_snapshot = None
         self._cached_tools = None
         self._last_response = None
+        self.last_raw_response = None
 
     def _can_continue(self, messages, tools) -> bool:
         if (

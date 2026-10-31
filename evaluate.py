@@ -270,6 +270,13 @@ def format_conversation(ev: dict) -> str:
                 lines.append(content)
                 turn_count += 1
 
+    full_response = ev.get("full_response", "")
+    if "<think>" in full_response:
+        lines.append("\n" + "-" * 80)
+        lines.append("💭 [MODEL THINKING TRACE]")
+        lines.append("-" * 80)
+        lines.append(full_response)
+
     lines.append("\n" + "-" * 80)
     lines.append("📊 [KẾT QUẢ ĐÁNH GIÁ (EVALUATION SUMMARY)]")
     lines.append("-" * 80)
@@ -745,6 +752,7 @@ def main():
     parser.add_argument("--output-dir", type=str, default=None, help="Thư mục lưu kết quả (mặc định: eval_results/<mode>_<timestamp>)")
     parser.add_argument("--model-id", type=str, default=None, help="Hugging Face Model ID tùy chọn")
     parser.add_argument("--max-new-tokens", type=int, default=512, help="Giới hạn token mới mỗi lượt để giảm VRAM (mặc định: 512)")
+    parser.add_argument("--thinking", action="store_true", help="Bật thinking mode cho Qwen")
     args = parser.parse_args()
 
     mode = args.mode
@@ -769,6 +777,7 @@ def main():
         output_dir=args.output_dir,
         model_id=args.model_id,
         max_new_tokens=args.max_new_tokens,
+        enable_thinking=args.thinking,
     )
 
 
