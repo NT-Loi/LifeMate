@@ -143,6 +143,7 @@ def main():
     parser.add_argument("--max-length", type=int, default=16384)
     parser.add_argument("--max-samples", type=int, default=None, help="Use the first N rows for a short run")
     parser.add_argument("--epochs", type=float, default=1)
+    parser.add_argument("--resume-from-checkpoint", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -244,7 +245,11 @@ def main():
         processing_class=processor.tokenizer,
         peft_config=lora_config,
     )
-    trainer.train()
+    trainer.train(
+        resume_from_checkpoint=(
+            str(args.resume_from_checkpoint) if args.resume_from_checkpoint else None
+        )
+    )
     trainer.save_model(str(args.output_dir))
     processor.save_pretrained(args.output_dir)
     (args.output_dir / "validation_ids.json").write_text(

@@ -87,5 +87,15 @@ uv run --no-sync python evaluate.py --mode train \
   --model-id outputs/lifemate-qwen35-4b-sft
 ```
 
+Training saves a checkpoint at the end of each epoch. To continue after the first epoch, set `--epochs` to the new total epoch count and resume from that epoch's checkpoint, for example:
+
+```bash
+checkpoint=$(find outputs/lifemate-qwen35-4b-sft -maxdepth 1 -type d -name 'checkpoint-*' | sort -V | tail -n 1)
+uv run --no-sync python -m agent.train_sft \
+  --epochs 2 \
+  --resume-from-checkpoint "$checkpoint" \
+  --output-dir outputs/lifemate-qwen35-4b-sft
+```
+
 ## Kaggle Notebook (T4 x 2 GPU)
 You can upload or open [kaggle_evaluation.ipynb](kaggle_evaluation.ipynb) on Kaggle with the `GPU T4 x 2` accelerator. It utilizes both T4 GPUs simultaneously via data-parallel workers, doubling evaluation throughput.
