@@ -140,7 +140,7 @@ def main():
     parser.add_argument("--data-path", type=Path, default=MODE["train"]["data_path"])
     parser.add_argument("--catalog-path", type=Path, default=MODE["train"]["catalog_path"])
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/lifemate-qwen35-4b-sft"))
-    parser.add_argument("--max-length", type=int, default=8192)
+    parser.add_argument("--max-length", type=int, default=16384)
     parser.add_argument("--max-samples", type=int, default=None, help="Use the first N rows for a short run")
     parser.add_argument("--epochs", type=float, default=1)
     parser.add_argument("--seed", type=int, default=42)

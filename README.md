@@ -70,7 +70,7 @@ uv run python evaluate.py --num-samples -1 --gpus 0,1
 
 ## SFT + QLoRA
 
-The training script uses only `audio_text` and labels from the train split, so it does not run ASR or read environment state files. It reconstructs each labeled tool call followed by its recorded tool result, holds out 10% of original samples for validation, and skips turns longer than the configured context length. The loss is on tool-call/`[]` outputs; the data has no gold reasoning traces to train thinking.
+The training script uses only `audio_text` and labels from the train split, so it does not run ASR or read environment state files. It reconstructs each labeled tool call followed by its recorded tool result, holds out 10% of original samples for validation, and skips turns longer than the 16,384-token default limit. The loss is on tool-call/`[]` outputs; the data has no gold reasoning traces to train thinking.
 
 On the GCP L4 VM, install the training packages and train the 4B model:
 
