@@ -216,7 +216,7 @@ def main():
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=8,
         learning_rate=2e-4,
-        warmup_ratio=0.03,
+        warmup_steps=0.03,
         lr_scheduler_type="cosine",
         weight_decay=0.01,
         max_grad_norm=0.3,
