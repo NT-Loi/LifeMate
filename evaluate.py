@@ -16,7 +16,6 @@ import unicodedata
 
 import torch
 import torch.multiprocessing as mp
-from tqdm import tqdm
 
 from agent.lifemate import LifeMateAgent
 from config import MODE
@@ -59,7 +58,7 @@ class _Tee:
 
 @contextmanager
 def _capture_output(log_path: Path | str):
-    """Capture output while keeping Python log records away from tqdm's terminal stream."""
+    """Capture stdout/stderr and route Python log records to a per-run log file."""
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8", buffering=1) as log_file:
@@ -555,6 +554,21 @@ def _run_evaluation(
         raw_conv_file.write(format_conversation(ev))
         raw_conv_file.flush()
 
+    def _print_sample_completion(ev: dict, completed: int, mode: str):
+        status = "ERROR" if ev.get("error") else "done"
+        elapsed = ev.get("elapsed_seconds")
+        duration = f" ({elapsed:.1f}s)" if isinstance(elapsed, (int, float)) else ""
+        metrics = ""
+        if mode == "train":
+            metrics = (
+                f" | state_match={ev.get('state_match', False)}"
+                f" | score={ev.get('score', 0.0):.4f}"
+            )
+        print(
+            f"[{completed}/{len(samples)}] {ev.get('id')}: {status}{duration}{metrics}",
+            flush=True,
+        )
+
     # 1. Chế độ Model-Parallelism sharded: 1 model chia đều các GPU với device_map="auto"
     if gpus == "auto":
         print(f"\n🚀 Đánh giá {len(samples)} mẫu với 1 Agent sharded trên toàn bộ GPU (device_map='auto')...")
@@ -562,21 +576,16 @@ def _run_evaluation(
         fuzzy_map = get_fuzzy_props(agent.catalog_path)
         results = []
 
-        with tqdm(total=len(samples), desc="Evaluating [AUTO SHARD]", unit="sample") as pbar:
-            for sample in samples:
-                try:
-                    ev = process_single_sample(agent, sample, fuzzy_map, mode)
-                except Exception as e:
-                    logger.exception("Failed to evaluate sample %s.", sample.get("id"))
-                    _recover_after_error(agent, e)
-                    ev = _error_result(sample, e)
-                results.append(ev)
-                _record_sample(ev)
-
-                run_avg = sum(r["score"] for r in results) / len(results)
-                run_sm = sum(1.0 for r in results if r.get("state_match")) / len(results)
-                pbar.set_postfix({"ID": ev["id"], "State": "✅" if ev.get("state_match") else "❌", "Score": f"{ev.get('score', 0):.2f}", "Avg": f"{run_avg:.2f}", "SM_Acc": f"{run_sm*100:.0f}%"})
-                pbar.update(1)
+        for sample in samples:
+            try:
+                ev = process_single_sample(agent, sample, fuzzy_map, mode)
+            except Exception as e:
+                logger.exception("Failed to evaluate sample %s.", sample.get("id"))
+                _recover_after_error(agent, e)
+                ev = _error_result(sample, e)
+            results.append(ev)
+            _record_sample(ev)
+            _print_sample_completion(ev, len(results), mode)
 
         raw_pred_file.close()
         raw_details_file.close()
@@ -613,38 +622,27 @@ def _run_evaluation(
             processes.append(p)
 
         results = []
-        with tqdm(total=len(samples), desc=f"Evaluating (GPUs {gpus})", unit="sample") as pbar:
-            while len(results) < len(samples):
-                try:
-                    ev = queue.get(timeout=5)
-                except Empty:
-                    if all(not process.is_alive() for process in processes):
-                        completed_ids = {result.get("id") for result in results}
-                        missing_ids = [sample["id"] for sample in samples if sample["id"] not in completed_ids]
-                        exit_codes = [process.exitcode for process in processes]
-                        logger.error(
-                            "All GPU workers exited before returning %d samples; missing=%s exit_codes=%s",
-                            len(missing_ids),
-                            missing_ids,
-                            exit_codes,
-                        )
-                        raise RuntimeError(
-                            f"GPU worker exited before returning samples {missing_ids}; exit codes: {exit_codes}"
-                        )
-                    continue
-                results.append(ev)
-                _record_sample(ev)
-
-                run_avg = sum(r["score"] for r in results) / len(results)
-                run_sm = sum(1.0 for r in results if r.get("state_match")) / len(results)
-                pbar.set_postfix({
-                    "ID": ev["id"],
-                    "State": "✅" if ev.get("state_match") else "❌",
-                    "Score": f"{ev.get('score', 0):.2f}",
-                    "Avg": f"{run_avg:.2f}",
-                    "SM": f"{run_sm*100:.0f}%",
-                })
-                pbar.update(1)
+        while len(results) < len(samples):
+            try:
+                ev = queue.get(timeout=5)
+            except Empty:
+                if all(not process.is_alive() for process in processes):
+                    completed_ids = {result.get("id") for result in results}
+                    missing_ids = [sample["id"] for sample in samples if sample["id"] not in completed_ids]
+                    exit_codes = [process.exitcode for process in processes]
+                    logger.error(
+                        "All GPU workers exited before returning %d samples; missing=%s exit_codes=%s",
+                        len(missing_ids),
+                        missing_ids,
+                        exit_codes,
+                    )
+                    raise RuntimeError(
+                        f"GPU worker exited before returning samples {missing_ids}; exit codes: {exit_codes}"
+                    )
+                continue
+            results.append(ev)
+            _record_sample(ev)
+            _print_sample_completion(ev, len(results), mode)
 
         for p in processes:
             p.join()
@@ -671,21 +669,16 @@ def _run_evaluation(
     fuzzy_map = get_fuzzy_props(agent.catalog_path)
     results = []
 
-    with tqdm(total=len(samples), desc=f"Evaluating [{dev_str.upper()}]", unit="sample") as pbar:
-        for sample in samples:
-            try:
-                ev = process_single_sample(agent, sample, fuzzy_map, mode)
-            except Exception as e:
-                logger.exception("Failed to evaluate sample %s.", sample.get("id"))
-                _recover_after_error(agent, e)
-                ev = _error_result(sample, e)
-            results.append(ev)
-            _record_sample(ev)
-
-            run_avg = sum(r["score"] for r in results) / len(results)
-            run_sm = sum(1.0 for r in results if r.get("state_match")) / len(results)
-            pbar.set_postfix({"ID": ev["id"], "State": "✅" if ev.get("state_match") else "❌", "Score": f"{ev.get('score', 0):.2f}", "Avg": f"{run_avg:.2f}", "SM": f"{run_sm*100:.0f}%"})
-            pbar.update(1)
+    for sample in samples:
+        try:
+            ev = process_single_sample(agent, sample, fuzzy_map, mode)
+        except Exception as e:
+            logger.exception("Failed to evaluate sample %s.", sample.get("id"))
+            _recover_after_error(agent, e)
+            ev = _error_result(sample, e)
+        results.append(ev)
+        _record_sample(ev)
+        _print_sample_completion(ev, len(results), mode)
 
     raw_pred_file.close()
     raw_details_file.close()
