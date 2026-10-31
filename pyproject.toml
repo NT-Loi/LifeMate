@@ -5,3 +5,25 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
+
+[project.optional-dependencies]
+gcp-l4 = [
+    "accelerate",
+    "bitsandbytes",
+    "causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.7.0/causal_conv1d-1.7.0+cu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl",
+    "flash-attn @ https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.0/flash_attn-2.8.3+cu128torch2.10-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl",
+    "flash-linear-attention[cuda]",
+    "huggingface-hub",
+    "torch==2.10.0",
+    "torchvision==0.25.0",
+    "transformers==5.21.0",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128", extra = "gcp-l4" }
+torchvision = { index = "pytorch-cu128", extra = "gcp-l4" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

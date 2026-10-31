@@ -15,6 +15,15 @@ uv pip install -r models/llm/requirements-qwen.txt
 uv run python -m models.llm.<model-name>
 ```
 
+### Google Cloud G2 / L4
+
+The optional `gcp-l4` extra pins a Python 3.12, PyTorch 2.10 + CUDA 12.8 environment and uses prebuilt FlashAttention 2 and causal-conv1d wheels.
+
+```bash
+uv sync --extra gcp-l4
+uv run --extra gcp-l4 python -m agent.lifemate
+```
+
 The model loaders use pinned revisions and local-only loading. Cache the selected model files while building the offline image; the Kaggle notebook defaults to Qwen3.5-2B and uses that model ID for both caching and evaluation.
 
 ```python
