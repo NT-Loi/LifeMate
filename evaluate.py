@@ -293,22 +293,29 @@ def format_conversation(ev: dict) -> str:
 def _process_single_sample(agent: LifeMateAgent, sample: dict, fuzzy_map: dict, mode: str) -> dict:
     """Xử lý và chấm điểm 1 sample, lưu trữ cả thông tin chạy, lịch sử hội thoại và kết quả điểm."""
     sid = sample["id"]
-    gold_calls = sample.get("label", {}).get("tool_calls", [])
+    gold_calls = sample.get("label", {}).get("tool_calls", []) if mode != "public_test" else []
 
-    # Replay gold calls trên ToolEnv để lấy gold_state_hash chuẩn
-    gold_env = agent.ToolEnv(mode, sid)
-    for gc in gold_calls:
-        gold_env.call(gc.get("name", ""), gc.get("arguments", {}))
-    gold_hash = gold_env.get_state_hash()
+    if mode == "public_test":
+        # Public-test has no labels. LifeMateAgent.predict owns the sample's only ToolEnv.
+        gold_hash = ""
+        ev = {"score": 0.0, "state_match": False, "p": 0.0, "r": 0.0, "f1": 0.0}
+    else:
+        # Replay gold calls on a separate environment only when training labels exist.
+        gold_env = agent.ToolEnv(mode, sid)
+        for gc in gold_calls:
+            gold_env.call(gc.get("name", ""), gc.get("arguments", {}))
+        gold_hash = gold_env.get_state_hash()
+        ev = None
 
-    # Chạy agent dự đoán qua audio_text
+    # Run the agent; public-test audio is transcribed by the configured ASR.
     res = agent.predict(sample)
     sub_calls = res.get("tool_calls", [])
     sub_hash = res.get("state_hash", "")
 
-    ev = evaluate_sample(sub_calls, sub_hash, gold_calls, gold_hash, fuzzy_map)
+    if ev is None:
+        ev = evaluate_sample(sub_calls, sub_hash, gold_calls, gold_hash, fuzzy_map)
     ev["id"] = sid
-    ev["audio_text"] = sample.get("audio_text", "")
+    ev["audio_text"] = res.get("transcribed_text", sample.get("audio_text", ""))
     ev["sub_calls"] = sub_calls
     ev["gold_calls"] = gold_calls
     ev["sub_hash"] = sub_hash
@@ -339,6 +346,7 @@ def _worker_process(
     sub_samples: list[dict],
     mode: str,
     model_id: str | None,
+    asr: str | None,
     llm_kwargs: dict,
     out_queue: Any,
     log_path: str,
@@ -350,7 +358,7 @@ def _worker_process(
         try:
             if device.startswith("cuda:") and torch.cuda.is_available():
                 torch.cuda.set_device(int(gpu_id))
-            agent = LifeMateAgent(asr=None, model_id=model_id, mode=mode, device=device, **llm_kwargs)
+            agent = LifeMateAgent(asr=asr, model_id=model_id, mode=mode, device=device, **llm_kwargs)
             fuzzy_map = get_fuzzy_props(agent.catalog_path)
         except Exception as e:
             logger.exception("Worker %s failed while initializing its model.", device)
@@ -498,6 +506,7 @@ def _run_evaluation(
     gpus: list[int] | str | None = None,
     output_dir: Path | str | None = None,
     model_id: str | None = None,
+    asr: str | None = None,
     **llm_kwargs,
 ) -> list[dict]:
     """Hàm chạy đánh giá đa GPU hoặc đơn GPU, kèm progress bar và lưu file."""
@@ -549,7 +558,7 @@ def _run_evaluation(
     # 1. Chế độ Model-Parallelism sharded: 1 model chia đều các GPU với device_map="auto"
     if gpus == "auto":
         print(f"\n🚀 Đánh giá {len(samples)} mẫu với 1 Agent sharded trên toàn bộ GPU (device_map='auto')...")
-        agent = LifeMateAgent(asr=None, model_id=model_id, mode=mode, device="auto", **llm_kwargs)
+        agent = LifeMateAgent(asr=asr, model_id=model_id, mode=mode, device="auto", **llm_kwargs)
         fuzzy_map = get_fuzzy_props(agent.catalog_path)
         results = []
 
@@ -594,6 +603,7 @@ def _run_evaluation(
                     sub_samples,
                     mode,
                     model_id,
+                    asr,
                     llm_kwargs,
                     queue,
                     str(output_dir / f"worker_{gpu_id}.log"),
@@ -657,7 +667,7 @@ def _run_evaluation(
     # 3. Chế độ đơn GPU hoặc CPU
     dev_str = f"cuda:{gpus[0]}" if isinstance(gpus, list) and str(gpus[0]).isdigit() else ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n🚀 Đánh giá {len(samples)} mẫu trên thiết bị [{dev_str.upper()}]...")
-    agent = LifeMateAgent(asr=None, model_id=model_id, mode=mode, device=dev_str, **llm_kwargs)
+    agent = LifeMateAgent(asr=asr, model_id=model_id, mode=mode, device=dev_str, **llm_kwargs)
     fuzzy_map = get_fuzzy_props(agent.catalog_path)
     results = []
 
@@ -692,6 +702,7 @@ def run_evaluation(
     gpus: list[int] | str | None = None,
     output_dir: Path | str | None = None,
     model_id: str | None = None,
+    asr: str | None = None,
     **llm_kwargs,
 ) -> list[dict]:
     if not samples:
@@ -722,6 +733,7 @@ def run_evaluation(
                 gpus=gpus,
                 output_dir=output_dir,
                 model_id=model_id,
+                asr=asr,
                 **llm_kwargs,
             )
     finally:
